@@ -60,7 +60,7 @@ context = runtime.context()
 The context type matches the runtime type. e.g `javascript_runtime` returns `javascript_context` instances. Similarly to runtimes, contexts are independent of one another such that the state of one context is distinct to and isolated from another unless it is explictly configured for sharing via context groups. 
 
 A context may evaluate javascript via several accessors:
-```
+```python
 
 context.eval(jscourceCode) # general javascript string evaluation, 
 # returns eval_result {"value": [python js value representation] or None , "exception": exception string or None }
