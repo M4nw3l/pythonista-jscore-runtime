@@ -19,8 +19,8 @@ with (jscore.runtime() as runtime, runtime.context() as context):
   print(context.eval('value_from_python[2] = "javascript"; value_from_python;').value)
 
 # output: 
-hello world
-['hello', 'from', 'javascript', 1, 2.2, 3.333333, {'object': 'value', 'nested': {'obj': ['array', [], {}]}}]
+# hello world
+# ['hello', 'from', 'javascript', 1, 2.2, 3.333333, {'object': 'value', 'nested': {'obj': ['array', [], {}]}}]
 
 ```
 Currently the main runtime and context implementation for the primary JavaScript evaluation and interop mechanism with JavaScriptCore is mostly working. WebAssembly modules and instances may also be instantiated and evaluated directly from JavaScript at the moment. WASM specific classes for runtime and context are placeholders currently. 
