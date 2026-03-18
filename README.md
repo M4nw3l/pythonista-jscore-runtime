@@ -73,6 +73,25 @@ context.eval_file(".path/to/js-file.js")
 context.eval_module_source(moduleSourceCode, './optional/path/to/virtal-name.js')
 context.eval_module_file("./path/to/module/index.js")
 ```
+### context.js accessor
+A `javascript_context` provides a `js` property which allows access to the javascript contexts global object in a 'python-esque' interface.
+Most simple python values may be retrieved and set through this accessor. It follows JavaScript access rules and can;t disobey them. 
+E.g. Setting a const value fails with an exception. All read/write variables may otherwise be set and manipulated.
+
+```python
+context.js.number = 10
+context.js.double = 1.1
+context.js.array = []
+context.js.object = {}
+```
+Creating a function however is slightly different as it uses javascript source
+```python
+context.js.my_function = javascript_function.from_source('function() { return 1234; }')
+```
+Defined functions may be called from Python:
+```python
+context.js.my_function() # returns 1234
+```
 
 ## Known issues
 - Can cause an occational random crash in Pythonista when Javascript is evaluated with no objective-c trace emitted. 
