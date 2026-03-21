@@ -702,13 +702,13 @@ class jscore:
 			return cls.JSValueMakeNumber(context_ref, value)
 		if isinstance(value, datetime):
 			value_utc = datetime.fromtimestamp(value.timestamp(), tz = timezone.utc)
-			value_str = value_utc.strftime("%Y%m%dT%H%M%S.%fZ")
+			value_str = value_utc.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 			str_ref = jscore.str_to_jsstringref(value_str)
 			return cls.JSValueMakeFromJSONString(context_ref, str_ref)
 		if isinstance(value, str):
 			str_ref = jscore.str_to_jsstringref(value)
 			return cls.JSValueMakeString(context_ref, str_ref)
-		if isinstance(value, list):
+		if isinstance(value, bytes) or isinstance(value, list):
 			count = len(value)
 			items = objc.c_array(count, lambda i: cls.py_to_jsvalueref(context_ref, value[i]))
 			ex_ref = c_void_p(0)
@@ -739,7 +739,13 @@ class javascript_encoder(json.JSONEncoder):
 	def default(self, obj):
 		if javascript_value.is_undefined(obj):
 			return None
-		if isinstance(obj, javascript_function):
+		elif isinstance(obj, datetime):
+			self.raw = True
+			return obj.replace(tzinfo=timezone.utc).strftime('new Date("%Y-%m-%dT%H:%M:%S.%fZ")')
+		elif isinstance(obj, bytes):
+			self.raw = True
+			return "".join(["new Uint8Array(",str(list(obj)),")"])
+		elif isinstance(obj, javascript_function):
 			self.raw = True
 			return str(obj)
 		return json.JSONEncoder.default(self, obj)
@@ -1626,4 +1632,7 @@ if __name__ == '__main__':
 	context.destroy()
 	runtime.destroy()
 	print(jscore._runtimes)
+	
+	print(jscore.py_to_js(datetime.now()))
+
 
