@@ -1117,7 +1117,7 @@ class jscore_context:
 		result = self.eval_result(javascript_value(result), ex)
 		return result
 	
-	def eval_jsscript(self, jsscript, release=False):
+	def eval_jsscript(self, jsscript):
 		if jsscript is None:
 			raise ValueError("Null JSScript pointer")
 		result = self.context.evaluateJSScript(jsscript) # crashes on null or invalid script ptr
@@ -1126,8 +1126,6 @@ class jscore_context:
 		if ex is not None:
 			self.context.setException(None) # clear exception if set
 		result = self.eval_result(javascript_value(result), ex)
-		if release:
-			jsscript.release() # this is crashy 
 		return result
 	
 	def eval_script_source(self, source, scriptType = jscore.kJSScriptTypeProgram, modulePath = None):
@@ -1156,7 +1154,7 @@ class jscore_runtime:
 		self.vm = None
 		self.depth = 0
 		self.module_paths = {}
-		self.scripts = {}
+		self.scripts = []
 		
 	def allocate(self):
 		if self.vm is not None:
@@ -1168,6 +1166,13 @@ class jscore_runtime:
 			raise Exception("VM already deallocated. Do not call allocate/deallocate manually")
 		self.vm.release()
 		self.vm = None
+		released = [] # avoid releasing more than once
+		for script in self.scripts:
+			if not script in released:
+				script.release()
+				released.append(script)
+		self.scripts = []
+		self.module_paths = {}
 		jscore.runtime_destroy(self)
 	
 	def alloc(self):
@@ -1228,7 +1233,7 @@ class jscore_runtime:
 		url = self.get_module_path(source, url)
 		url = f"file://{url}"
 		script = jsscript_ref(self, url, source)
-		self.scripts[url] = script
+		self.scripts.append(script)
 		return script
 
 	def load_script(self, loader, context, scriptType = jscore.kJSScriptTypeProgram, sourceUrl = None):
@@ -1244,7 +1249,7 @@ class jscore_runtime:
 		else:
 			error = None
 		sourceUrl = str(sourceUrl)
-		self.scripts[sourceUrl] = script
+		self.scripts.append(script)
 		return script, sourceUrl, error
 
 	def __enter__(self):
@@ -1519,7 +1524,8 @@ if __name__ == '__main__':
 		print("-" * 35)
 		print("")
 
-	header("jscore_runtime tests")
+	header("javascript runtime")
+	print(runtime, context)
 	header("primitives", True)
 	eval("parseInt('1')", 1)
 	
@@ -1643,4 +1649,12 @@ if __name__ == '__main__':
 	runtime.destroy()
 	print(jscore._runtimes)
 	
-	print(jscore.py_to_js(datetime.now()))
+	header("wasm runtime")
+	runtime = jscore.runtime(wasm_runtime)
+	context = runtime.context()
+	print(runtime, context)
+	
+	context.destroy()
+	runtime.destroy()
+	print(jscore._runtimes)
+
