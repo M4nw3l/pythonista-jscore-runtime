@@ -573,7 +573,7 @@ class jscore:
 		context_ref, value_ref = cls.jsvalue_get_refs(value)
 		if jscore.JSObjectIsFunction(context_ref, value_ref):
 			return javascript_function(value, context_ref, value_ref)
-		keys = cls.jsobjectref_keys(context_ref,value_ref)
+		keys = cls.jsobjectref_keys(context_ref, value_ref)
 		obj = None
 		if value.isArray():
 			obj = []
@@ -581,7 +581,10 @@ class jscore:
 				jsvalue = value.valueForProperty_(key)
 				obj.append(cls.jsvalue_to_py(jsvalue))
 		else:
-			obj = {}
+			prototype_ref = cls.JSObjectGetPrototype(context_ref, value_ref)
+			obj = cls.jsvalueref_to_py(context_ref, prototype_ref)
+			if javascript_value.is_null_or_undefined(obj):
+				obj = {}
 			for key in keys:
 				jsvalue = value.valueForProperty_(key)
 				obj[key] = cls.jsvalue_to_py(jsvalue)
@@ -589,16 +592,11 @@ class jscore:
 
 	@classmethod
 	def jsvalue_to_py(cls, value):
-		if value is None:
+		if value is None or value.isNull():
 			return None
-		if value is javascript_value.undefined:
-			return javascript_value.undefined
 
-		if value.isUndefined():
+		if javascript_value.is_undefined(value) or value.isUndefined():
 			return javascript_value.undefined
-
-		if value.isNull():
-			return None
 			
 		if value.isBoolean():
 			return value.toBool()
@@ -619,7 +617,8 @@ class jscore:
 		if jscore.JSObjectIsFunction(context_ref, value_ref):
 			return False
 		return True
-		
+	
+	@classmethod
 	def jsobject_get_keys(cls, value):
 		if javascript_value.is_undefined(value) or not value.isObject():
 			return []
@@ -631,30 +630,33 @@ class jscore:
 	@classmethod
 	def jsobjectref_to_py(cls, context_ref, value_ref):
 		ex = c_void_p(0)
-		value_ref = jscore.JSValueToObject(context_ref, value_ref, byref(ex))
-		if jscore.JSObjectIsFunction(context_ref, value_ref):
+		value_ref = cls.JSValueToObject(context_ref, value_ref, byref(ex))
+		if cls.JSObjectIsFunction(context_ref, value_ref):
 			str_ref = cls.JSValueToStringCopy(context_ref, value_ref, byref(ex))
 			source = None
 			if str_ref:
-				source =  cls.jsstringref_to_py(str_ref)
+				source = cls.jsstringref_to_py(str_ref)
 			return javascript_function(None, context_ref, value_ref, source)
-		names_ref = jscore.JSObjectCopyPropertyNames(context_ref, value_ref)
-		count = jscore.JSPropertyNameArrayGetCount(names_ref)
+		names_ref = cls.JSObjectCopyPropertyNames(context_ref, value_ref)
+		count = cls.JSPropertyNameArrayGetCount(names_ref)
 		obj = None
-		if jscore.JSValueIsArray(context_ref, value_ref):
+		if cls.JSValueIsArray(context_ref, value_ref):
 			obj = []
 			for i in range(count):
-				key_ref = jscore.JSPropertyNameArrayGetNameAtIndex(names_ref, i)
-				jsvalue_ref = jscore.JSObjectGetProperty(context_ref, value_ref, key_ref, byref(ex))
+				key_ref = cls.JSPropertyNameArrayGetNameAtIndex(names_ref, i)
+				jsvalue_ref = cls.JSObjectGetProperty(context_ref, value_ref, key_ref, byref(ex))
 				obj.append(cls.jsvalueref_to_py(context_ref, jsvalue_ref))
 		else:
-			obj = {}
+			prototype_ref = cls.JSObjectGetPrototype(context_ref, value_ref)
+			obj = cls.jsvalueref_to_py(context_ref, prototype_ref)
+			if javascript_value.is_null_or_undefined(obj):
+				obj = {}
 			for i in range(count):
-				key_ref = jscore.JSPropertyNameArrayGetNameAtIndex(names_ref, i)
-				jsvalue_ref = jscore.JSObjectGetProperty(context_ref, value_ref, key_ref, byref(ex))
+				key_ref = cls.JSPropertyNameArrayGetNameAtIndex(names_ref, i)
+				jsvalue_ref = cls.JSObjectGetProperty(context_ref, value_ref, key_ref, byref(ex))
 				key = cls.jsstringref_to_py(key_ref)
 				obj[key] = cls.jsvalueref_to_py(context_ref, jsvalue_ref)
-		jscore.JSPropertyNameArrayRelease(names_ref)
+		cls.JSPropertyNameArrayRelease(names_ref)
 		return obj
 	
 	@classmethod
@@ -860,6 +862,14 @@ class javascript_value:
 	@classmethod
 	def is_undefined(cls, value):
 		return value is cls.undefined
+	
+	@classmethod
+	def is_null(cls, value):
+		return value is None
+	
+	@classmethod
+	def is_null_or_undefined(cls,value):
+		return cls.is_null(value) or cls.is_undefined(value)
 
 	def __init__(self, jsvalue = None, context_ref = None, value_ref = None):
 		if jsvalue is None and context_ref is None and value_ref is None:
@@ -1634,5 +1644,3 @@ if __name__ == '__main__':
 	print(jscore._runtimes)
 	
 	print(jscore.py_to_js(datetime.now()))
-
-
