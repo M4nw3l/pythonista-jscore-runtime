@@ -62,10 +62,10 @@ The context type matches the runtime type. e.g `javascript_runtime` returns `jav
 A context may evaluate javascript via several accessors:
 ```python
 
-context.eval(jscourceCode) # general javascript string evaluation, 
+context.eval(jscourceCode) # general javascript string evaluation
 # returns eval_result {"value": [python js value representation] or None , "exception": exception string or None }
 
-# module loader based scripts handling. (Note: These methods are still highly experimental and can crash Pythonista at the moment in sone circumstances!)
+# module loader based scripts handling. (Note: These methods are still highly experimental and can crash Pythonista!)
 
 context.eval_source(jssourceCode)
 context.eval_file(".path/to/js-file.js")
@@ -73,10 +73,10 @@ context.eval_file(".path/to/js-file.js")
 context.eval_module_source(moduleSourceCode, './optional/path/to/virtal-name.js')
 context.eval_module_file("./path/to/module/index.js")
 ```
+
 ### context.js accessor
 A `javascript_context` provides a `js` property which allows access to the javascript contexts global object in a 'python-esque' interface.
-Most simple python values may be retrieved and set through this accessor. It follows JavaScript access rules and can;t disobey them. 
-E.g. Setting a const value fails with an exception. All read/write variables may otherwise be set and manipulated.
+Most simple python values may be retrieved and set through this accessor. It follows JavaScript access rules, and cannot subvert them, e.g. setting a const value fails with an exception. All read/write variables may otherwise be set and manipulated.
 
 ```python
 context.js.number = 10
@@ -94,7 +94,7 @@ context.js.my_function() # returns 1234
 ```
 
 ## Known issues
-- Can cause an occational random crash in Pythonista when Javascript is evaluated with no objective-c trace emitted. 
+- JSScript loading can cause a random crash in Pythonista when Javascript is evaluated with no objective-c trace emitted. 
 - Modules and scripts loading has patchy/limited ES6 support, some libaraies may need adjustments to work currently.
 - ModulesLoaderDelegate is using a private protcol / api as there is no other way to access the functionality otherwise.
-- JSScript source code strings are C++ classes and awkward structures to read with ctypes. A work around of separately loading a copy of the script source is used to work round this at the moment. Module preprocessing performed by loading the JSScript can not effectively be evaluated as a result of this currently.
+- JSScript source code strings are C++ objects which are more awkward structures to read with ctypes. A work around of separately loading a copy of the script source is used at the moment, so any module preprocessing performed when loading a JSScript is lost currently.
