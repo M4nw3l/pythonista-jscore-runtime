@@ -790,9 +790,10 @@ class javascript_function:
 			raise ImportError("Cannot compile function from source without context_ref")
 		if self.source is None:
 			raise ImportError("Cannot compile function with no source")
-		name_match = re.match(self.body, "function\s+([A-z0-9_]+)\s*\(")
-		fn_name = name_match.group(0)
-		params_match = re.match("function\s+[A-z0-9_]+\s*\(([A-z0-9_,\s]+)\)")
+		self.source = self.source.strip()
+		name_match = re.match("function([^\(]*)\(", self.source)
+		fn_name = name_match.group(0).strip()
+		params_match = re.match("function[^\(]*\(([^\)]*)\)", self.source)
 		params = params_match.group(0).split(",")
 		params_refs = []
 		for p in params:
@@ -845,7 +846,7 @@ class javascript_function:
 			return str(self.jsvalue)
 		
 	@classmethod
-	def from_source (cls, source, context = None):
+	def from_source(cls, source, context = None):
 		context_ref = None
 		if isinstance(context, c_void_p):
 			context_ref = context
@@ -1768,6 +1769,4 @@ if __name__ == '__main__':
 	context.destroy()
 	runtime.destroy()
 	print(jscore._runtimes)
-	
-	
-	
+
