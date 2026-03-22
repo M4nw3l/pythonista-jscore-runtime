@@ -5,11 +5,8 @@ Develop apps with Python, JavaScript and WebAssembly libraries, components and c
 """
 from ctypes import *
 from ctypes.util import find_library
-from objc_util import (ObjCClass, ObjCInstance, object_getClass, class_getName,
-                       class_getClassMethod, class_getInstanceMethod,
-                       method_getName, objc_getClass, ns, nsurl, NSObject, NSArray,
-                       NSDictionary, NSNumber, NSString, create_objc_class, retain_global, objc_getProtocol, c, sel,
-                       load_framework, on_main_thread)
+from objc_util import *
+from objc_util import (c, object_getClass, class_getName, objc_getProtocol)
 import weakref
 from datetime import (datetime, timezone)
 import json, re
@@ -970,14 +967,14 @@ class jscore_module_loader:
 		self.modules = {}
 		self.sources = {}
 		self.delegate = jscore.JSCoreModuleLoaderDelegate.alloc().init().autorelease()
-		self.delegate._pyinstance = weakref.ref(self)
 		retain_global(self.delegate)
+		self.delegate._pyinstance = weakref.ref(self)
 		self.context.setModuleLoaderDelegate_(self.delegate)
 		self.evaluated = {}
 		
 	def release(self):
 		self.context.setModuleLoaderDelegate_(None)
-		self.delegate.release()
+		release_global(self.delegate)
 		self.delegate = None
 		
 	def fetch_module(self, module, resolve, reject):
@@ -1080,6 +1077,7 @@ class jscore_context:
 		if self.context is not None:
 			raise Exception("Context already allocated. Do not call allocate/deallocate manually.")
 		self.context = jscore.JSContext.alloc().initWithVirtualMachine_(self.runtime.vm)
+		retain_global(self.context)
 		self.context.setInspectable(True)
 		self.loader = jscore_module_loader(self)
 		
@@ -1088,7 +1086,7 @@ class jscore_context:
 			raise Exception("Context already deallocated. Do not call allocate/deallocate manually.")
 		self.loader.release()
 		self.loader = None
-		self.context.release()
+		release_global(self.context)
 		self.context = None
 
 	def alloc(self):
@@ -1185,16 +1183,20 @@ class jscore_runtime:
 		if self.vm is not None:
 			raise Exception("VM already allocated. Do not call allocate/deallocate manually")
 		self.vm = jscore.JSVirtualMachine.alloc().init()
+		retain_global(self.vm)
 	
 	def deallocate(self):
 		if self.vm is None:
 			raise Exception("VM already deallocated. Do not call allocate/deallocate manually")
-		self.vm.release()
+		release_global(self.vm)
 		self.vm = None
 		released = [] # avoid releasing more than once
 		for script in self.scripts:
 			if not script in released:
-				script.release()
+				if isinstance(script, jsscript_ref):
+					script.release()
+				else:
+					release_global(script)
 				released.append(script)
 		self.scripts = []
 		self.module_paths = {}
