@@ -66,10 +66,7 @@ context.eval(jsSourceCode)
 # returns:
 # eval_result {"value": [python js value representation] or None , "exception": exception string or None }
 
-# module loader based evaluation functions
-# all also return:
-# eval_result {"value": [python js value representation] or None , "exception": exception string or None }
-
+# module loader based javascript evaluation functions
 # regular javascript scripts/programs loaded synchronously
 context.eval_source(jsSourceCode)
 context.eval_file(".path/to/js-file.js")
@@ -77,6 +74,9 @@ context.eval_file(".path/to/js-file.js")
 # javascript modules loaded asynchronously
 context.eval_module_source(moduleSourceCode, './optional/path/to/virtal-name.js')
 context.eval_module_file("./path/to/module/index.js")
+
+# all return:
+# eval_result {"value": [python js value representation] or None , "exception": exception string or None }
 ```
 
 ### context.js accessor
