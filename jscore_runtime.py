@@ -836,6 +836,11 @@ class javascript_function:
 
 		raise NotImplementedError("Cannot call this type of javascript_function")
 
+	@property
+	def is_native(self):
+		repr = str(self).strip()
+		return re.fullmatch("function[^\{]+\{[^\[]+\[native code\][^\}]+}", repr) is not None
+	
 	def __call__(self, *args):
 		return self.call().value
 
@@ -1469,7 +1474,7 @@ class jsobject_accessor:
 		return value
 
 
-# metaclass to map the main global context to appear analogous to a regular python object 
+# metaclass to map the main global context to appear analogous to a regular python object
 class javascript_context_accessor:
 	def __init__(self, context):
 		self.___context___ = context
@@ -1641,6 +1646,7 @@ if __name__ == '__main__':
 			value = values["value"]
 			print(f"Expected: {expected}\nActual: {value}\nPassed: {match}")
 		print("-" * 35)
+		return value
 		
 	def header(text, end_only = False):
 		if not end_only:
@@ -1721,7 +1727,7 @@ if __name__ == '__main__':
 	''')
 	# A memset test as described:
 	# https://developer.apple.com/forums/thread/121040
-	eval('''(function(){
+	inst = eval('''(function(){
 	const bin = new Uint8Array([0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,3,2,1,0,5,3,1,0,1,7,8,1,4,116,101,115,116,0,0,10,16,1,14,0,32,0,65,1,54,2,0,32,0,40,2,0,11]);
 	let result = null;
 	try
@@ -1730,6 +1736,7 @@ if __name__ == '__main__':
 			const instance = new WebAssembly.Instance(module);
 			result = ''+module+' '+instance;
 			result += '\\n'+instance.exports.test(4);
+			return instance;
 	}
 	catch(ex)
 	{
@@ -1739,6 +1746,8 @@ if __name__ == '__main__':
 	})();
 	//
 	''')
+	
+	print(inst.exports.test.is_native)
 	
 	header("context.js interop")
 	header("Create new object", True)
