@@ -59,17 +59,22 @@ context = runtime.context()
 ```
 The context type matches the runtime type. e.g `javascript_runtime` returns `javascript_context` instances. Similarly to runtimes, contexts are independent of one another such that the state of one context is distinct to and isolated from another unless it is explictly configured for sharing via context groups. 
 
-A context may evaluate javascript via several accessors:
+A context may evaluate javascript with several javascript evaluation function variants:
 ```python
+# general purpose javascript string evaluation function
+context.eval(jsSourceCode) 
+# returns:
+# eval_result {"value": [python js value representation] or None , "exception": exception string or None }
 
-context.eval(jscourceCode) # general javascript string evaluation
-# returns eval_result {"value": [python js value representation] or None , "exception": exception string or None }
+# module loader based evaluation functions
+# all also return:
+# eval_result {"value": [python js value representation] or None , "exception": exception string or None }
 
-# module loader based scripts handling. (Note: These methods are still highly experimental and can crash Pythonista!)
-
-context.eval_source(jssourceCode)
+# regular javascript scripts/programs loaded synchronously
+context.eval_source(jsSourceCode)
 context.eval_file(".path/to/js-file.js")
 
+# javascript modules loaded asynchronously
 context.eval_module_source(moduleSourceCode, './optional/path/to/virtal-name.js')
 context.eval_module_file("./path/to/module/index.js")
 ```
@@ -94,7 +99,7 @@ context.js.my_function() # returns 1234
 ```
 
 ## Known issues
-- JSScript loading can cause a random crash in Pythonista when Javascript is evaluated with no objective-c trace emitted. 
-- Modules and scripts loading has patchy/limited ES6 support, some libaraies may need adjustments to work currently.
+- Loading javascript files from remote sources / cdns etc is not implemented (yet).
+- Modules and scripts loading may not work correctly for some javascript libraries and they may need manual adjustments to work currently.
 - ModulesLoaderDelegate is using a private protcol / api as there is no other way to access the functionality otherwise.
 - JSScript source code strings are C++ objects which are more awkward structures to read with ctypes. A work around of separately loading a copy of the script source is used at the moment, so any module preprocessing performed when loading a JSScript is lost currently.
