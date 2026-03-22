@@ -834,7 +834,7 @@ class javascript_function:
 			return javascript_value(None, context_ref, value_ref)
 
 		raise NotImplementedError("Cannot call this type of javascript_function")
-	
+
 	def __call__(self, *args):
 		return self.call().value
 
@@ -1273,7 +1273,117 @@ class jscore_runtime:
 		self.alloc()
 		return self.new_context()
 
-# metaclass to map jsobjects to appear analogous to regular python objects 
+# helper class to determine the minimum set of changes to build a jsvalue in terms of javascript statements
+class jsvalue_accessor:
+	def __init__(self, context, key, current = javascript_value.undefined, define = True):
+		self.context = context
+		self.key = key
+		self.current = jsobject_accessor.unwrap(current)
+		self.define = define
+	
+	def object_equal(self, x, y):
+		if isinstance(x, dict):
+			for k,v in x.items():
+				try:
+					if not self.item_equal(v, y[k]):
+						return False
+				except:
+					return False
+			return True
+		elif isinstance(x, list):
+			for i in range(len(x)):
+				v = x[i]
+				try:
+					if not self.item_equal(v, y[i]):
+						return False
+				except:
+					return False
+			return True
+		return False
+	
+	def value_equal(self, x, y):
+		if x is y or x == y:
+			return True
+		return str(x) == str(y) # repr compare
+		
+	def item_equal(self, x, y):
+		if isinstance(x, list) or isinstance(x, dict):
+			return self.object_equal(x, y)
+		return self.value_equal(x, y)
+	
+	def build(self, key, value, current, equal = None):
+		if isinstance(value, list):
+			if (equal is None and self.object_equal(value, current)) or equal:
+				return None
+			if javascript_value.is_null_or_undefined(current) or len(current) == 0:
+				value = jscore.py_to_js(value)
+				return f'{key} = {value};'
+			statements = []
+			for i in range(len(value)):
+				k = str(i)
+				v = value[i]
+				c = javascript_value.undefined
+				try:
+					c = current[i]
+				except:
+					pass
+				if not self.item_equal(v, c):
+					k = "".join([key, '[', k, ']'])
+					s = self.build(k, v, c, False)
+					if s is not None:
+						statements.append(s)
+			if len(statements) > 0:
+				return "\n".join(statements)
+			return statement
+		elif isinstance(value, dict):
+			if (equal is None and self.object_equal(value, current)) or equal:
+				return None
+			if javascript_value.is_null_or_undefined(current) or len(current) == 0:
+				value = jscore.py_to_js(value)
+				return f'{key} = {value};'
+			statements = []
+			for k,v in value.items():
+				c = javascript_value.undefined
+				try:
+					c = current[k]
+				except:
+					pass
+				if not self.item_equal(v, c):
+					k = "".join([key, '.', k])
+					s = self.build(k, v, c, False)
+					if s is not None:
+						statements.append(s)
+			if len(statements) > 0:
+				return "\n".join(statements)
+			return statement
+		else:
+			if (equal is None and self.value_equal(value, current)) or equal:
+				return None
+			value = jscore.py_to_js(value)
+			return f'{key} = {value};'
+
+	def set(self, value):
+		value = jsobject_accessor.unwrap(value)
+		current = self.current
+		key = self.key
+		define = self.define
+		statement = None
+		if define and javascript_value.is_undefined(current):
+			key = f'let {key}'
+			value = jscore.py_to_js(value)
+			statement = f'{key} = {value};'
+		else:
+			statement = self.build(key, value, current)
+		if statement is None:
+			return
+		#print(statement)
+		result = self.context.eval(statement)
+		exception = result.exception
+		if exception is not None:
+			raise ValueError(exception)
+
+
+# metaclass to map jsobjects to appear analogous to regular python objects
 class jsobject_accessor:
 	def __init__(self, context, jsobject, key):
 		self.___context___ = context
@@ -1295,15 +1405,14 @@ class jsobject_accessor:
 		return jscore.jsvalue_to_py(value)
 		
 	def ___set___(self, key, value):
+		current = self.___get___(key)
+		context = self.___context___
 		if self.___jsobject___.isArray():
 			key = "".join([self.___key___,'[', key,']'])
 		else:
 			key = ".".join([self.___key___, key])
-		value = jscore.py_to_js(value)
-		result = self.___context___.eval(f'{key} = {value};')
-		exception = result.exception
-		if exception is not None:
-			raise ValueError(exception)
+		accessor = jsvalue_accessor(context, key, current, define=False)
+		accessor.set(value)
 			
 	def __len__(self):
 		return len(jscore.jsobject_get_keys(self.___jsobject___))
@@ -1339,6 +1448,7 @@ class jsobject_accessor:
 			return jscore.jsvalue_to_py(value.___jsobject___)
 		return value
 
+
 # metaclass to map the main global context to appear analogous to a regular python object 
 class javascript_context_accessor:
 	def __init__(self, context):
@@ -1360,14 +1470,10 @@ class javascript_context_accessor:
 		return jscore.jsvalue_to_py(value)
 		
 	def ___set___(self, key, value):
-		current = getattr(self, key)
-		if javascript_value.is_undefined(current):
-			key = f'let {key}'
-		value = jscore.py_to_js(value)
-		result = self.___context___.eval(f'{key} = {value};')
-		exception = result.exception
-		if exception is not None:
-			raise ValueError(exception)
+		current = self.___get___(key)
+		context = self.___context___
+		accessor = jsvalue_accessor(context, key, current, define=True)
+		accessor.set(value)
 
 	def __getattr__(self, key):
 		return self.___get___(key)
@@ -1616,9 +1722,14 @@ if __name__ == '__main__':
 	
 	header("context.js interop")
 	header("Create new object", True)
-	print("context.js.interop_newobj = { 'test':{'object':[]}, 'int':1, 'double':2.45 }")
-	context.js.interop_newobj = { 'test':{'object':[]}, 'int':1, 'double':2.45 }
-	print("Result:", context.js.interop_newobj)
+	print("context.js.interop_obj = { 'test':{'object':[]}, 'int':1, 'double':2.45 }")
+	context.js.interop_obj = { 'test':{'object':[]}, 'int':1, 'double':2.45 }
+	print("Result:", context.js.interop_obj)
+	
+	header("Modify object", True)
+	print("context.js.interop_obj = { 'test':{'object':[1,2,3]}, 'int':1, 'double':2.45 }")
+	context.js.interop_obj = { 'test':{'object':[1,2,3]}, 'int':1, 'double':2.45 }
+	print("Result:", context.js.interop_obj)
 	
 	header("Create new function")
 	print('"interopfn" in context.js = ', "interopfn" in context.js)
@@ -1657,4 +1768,6 @@ if __name__ == '__main__':
 	context.destroy()
 	runtime.destroy()
 	print(jscore._runtimes)
-
+	
+	
+	
