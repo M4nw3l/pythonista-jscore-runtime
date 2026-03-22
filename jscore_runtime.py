@@ -857,6 +857,23 @@ class javascript_function:
 				context_ref = context.JSGlobalContextRef()
 		return cls(source=source, context_ref=context_ref)
 
+class javascript_object(dict):
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.___init___ = True
+		
+	def __getattr__(self, key):
+		value = self.get(key, javascript_value.undefined)
+		if isinstance(value, dict):
+			value = javascript_object(value)
+		return value
+		
+	def __setattr__(self, key, value):
+		if not self.__dict__.get("___init___", False):
+			super().__setattr__(key, value)
+		else:
+			self[key] = value
+
 
 class javascript_value:
 	undefined = javascript_undefined_value()
@@ -890,6 +907,8 @@ class javascript_value:
 				self._val = jscore.jsvalueref_to_py(self.context_ref, self.value_ref)
 			else:
 				self._val = javascript_value.undefined
+			if isinstance(self._val, dict):
+				self._val = javascript_object(self._val)
 			self._cached = True
 		return self._val
 		
