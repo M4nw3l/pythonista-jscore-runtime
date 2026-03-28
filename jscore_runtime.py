@@ -15,6 +15,7 @@ import tempfile, shutil, os
 import ui
 
 NSDate = ObjCClass("NSDate")
+NSFileManager = ObjCClass("NSFileManager")
 
 #objective c helpers
 class objc:
@@ -298,6 +299,18 @@ class objc:
 		if ptr is None:
 			return array
 		return cast(array, ptr)
+		
+	def nsdata_from_file(cls, path, fileManager = None):
+		if fileManager is None:
+			fileManager = NSFileManager.defaultManager()
+		path = Path(str(path))
+		if not path.is_absolute():
+			path = path.cwd().joinpath(path)
+		if not path.exists():
+			raise FileNotFoundError(f"File not found at path '{path}'")
+		path = str(path)
+		data = fileManager.contentsAtPath_(path)
+		return data
 
 
 #JavaScriptCore api
@@ -356,7 +369,7 @@ class jscore:
 	JSValueIsObjectOfClass = objc.c_func(lib.JSValueIsObjectOfClass, c_bool, c_void_p, c_void_p, c_void_p)
 	JSValueIsArray = objc.c_func(lib.JSValueIsArray, c_bool, c_void_p, c_void_p)
 	JSValueIsDate = objc.c_func(lib.JSValueIsDate, c_bool, c_void_p, c_void_p)
-	JSValueGetTypedArrayType = objc.c_func(lib.JSValueGetTypedArrayType, c_void_p, c_void_p, c_void_p, c_void_p)
+	JSValueGetTypedArrayType = objc.c_func(lib.JSValueGetTypedArrayType, c_int, c_void_p, c_void_p, c_void_p)
 	JSValueMakeUndefined = objc.c_func(lib.JSValueMakeUndefined, c_void_p, c_void_p)
 	JSValueMakeNull = objc.c_func(lib.JSValueMakeNull, c_void_p, c_void_p)
 	JSValueMakeBoolean = objc.c_func(lib.JSValueMakeBoolean, c_void_p, c_void_p, c_bool)
@@ -414,10 +427,10 @@ class jscore:
 	JSPropertyNameArrayRelease = objc.c_func(lib.JSPropertyNameArrayRelease, None, c_void_p)
 	JSPropertyNameArrayRetain = objc.c_func(lib.JSPropertyNameArrayRetain, c_void_p, c_void_p)
 	
-	JSObjectMakeTypedArray = objc.c_func(lib.JSObjectMakeTypedArray, c_void_p, c_void_p, c_uint, c_size_t, c_void_p)
-	JSObjectMakeTypedArrayWithBytesNoCopy = objc.c_func(lib.JSObjectMakeTypedArrayWithBytesNoCopy, c_void_p, c_void_p, c_uint, c_void_p, c_size_t, c_void_p, c_void_p, c_void_p)
-	JSObjectMakeTypedArrayWithArrayBuffer = objc.c_func(lib.JSObjectMakeTypedArrayWithArrayBuffer, c_void_p, c_void_p, c_uint, c_void_p, c_void_p)
-	JSObjectMakeTypedArrayWithArrayBufferAndOffset = objc.c_func(lib.JSObjectMakeTypedArrayWithArrayBufferAndOffset, c_void_p, c_void_p, c_uint, c_void_p, c_size_t, c_size_t, c_void_p)
+	JSObjectMakeTypedArray = objc.c_func(lib.JSObjectMakeTypedArray, c_void_p, c_void_p, c_int, c_size_t, c_void_p)
+	JSObjectMakeTypedArrayWithBytesNoCopy = objc.c_func(lib.JSObjectMakeTypedArrayWithBytesNoCopy, c_void_p, c_void_p, c_int, c_void_p, c_size_t, c_void_p, c_void_p, c_void_p)
+	JSObjectMakeTypedArrayWithArrayBuffer = objc.c_func(lib.JSObjectMakeTypedArrayWithArrayBuffer, c_void_p, c_void_p, c_int, c_void_p, c_void_p)
+	JSObjectMakeTypedArrayWithArrayBufferAndOffset = objc.c_func(lib.JSObjectMakeTypedArrayWithArrayBufferAndOffset, c_void_p, c_void_p, c_int, c_void_p, c_size_t, c_size_t, c_void_p)
 	JSObjectGetTypedArrayBytesPtr = objc.c_func(lib.JSObjectGetTypedArrayBytesPtr, c_void_p, c_void_p, c_void_p, c_void_p)
 	JSObjectGetTypedArrayLength = objc.c_func(lib.JSObjectGetTypedArrayLength, c_size_t, c_void_p, c_void_p, c_void_p)
 	JSObjectGetTypedArrayByteLength = objc.c_func(lib.JSObjectGetTypedArrayByteLength, c_size_t, c_void_p, c_void_p, c_void_p)
@@ -636,6 +649,13 @@ class jscore:
 		if jscore.JSObjectIsFunction(context_ref, value_ref):
 			return False
 		return True
+		
+	@classmethod
+	def jsvalue_is_array_type(cls, value, typedArrayType):
+		context_ref, value_ref = cls.jsvalue_get_refs(value)
+		ex = c_void_p(None)
+		arrayType = cls.JSValueGetTypedArrayType(context_ref, value_ref, byref(ex))
+		return arrayType == typedArrayType
 	
 	@classmethod
 	def jsobject_get_keys(cls, value):
@@ -1204,6 +1224,11 @@ class jscore_context:
 	def eval_module_file(self, path):
 		return self.eval_script_file(path, jscore.kJSScriptTypeModule)
 	
+	@property
+	def context_ref(self):
+		self.alloc()
+		return self.context.JSGlobalContextRef()
+	
 
 class jscore_runtime:
 	def __init__(self):
@@ -1584,9 +1609,187 @@ class javascript_runtime(jscore_runtime):
 		return javascript_context(self)
 
 # wasm (WebAssembly)
+class wasm_module:
+	magic = b'\0asm'
+	version = b'\1\0\0\0'
+	header = magic + version
+	
+	@classmethod
+	def has_header(cls, data):
+		header = cls.header
+		header_len = len(header)
+		index = 0
+		for byte in data:
+			if byte != header[index]:
+				return False
+			index = index + 1
+			if index == header_len:
+				return True
+		return False
+	
+	def __init__(self, data = None, name = None):
+		self.name = name
+		if self.name is not None:
+			self.name = str(name)
+		self.data = None
+		self.nsdata = None
+		self.context = None
+		self.jsdata = None
+		self.module = None
+		if objc.ns_subclass_of(data, NSData):
+			self.nsdata = data
+		elif isinstance(data, list) or isinstance(data, bytes):
+			self.data = []
+			data = bytes(data)
+			if not wasm_module.has_header(data):
+				raise ArgumentError(f"Invalid wasm module. Modules must start with '{wasm_module.header}'.")
+			self.data.append(data)
+		elif isinstance(data, str) or isinstance(data, Path):
+			self.nsdata = objc.nsdata_from_file(data)
+		elif data is not None:
+			raise ArgumentError("Unknown module data type "+type(data))
+		else:
+			self.data = []
+
+	def append(self, data):
+		if self.data is None or self.nsdata is not None:
+			raise Exception("NSData is read only")
+		self.data.append(b''.join(data))
+
+	@property
+	def bytes(self):
+		if self.data is not None:
+			bytes = b''.join(self.data)
+			if not wasm_module.has_header(bytes):
+				return wasm_module.header + bytes
+			return bytes
+		if self.nsdata is not None:
+			return nsdata_to_bytes(self.nsdata)
+		if self.module is not None:
+			return self.module.bytes
+		return b''
+		
+	def load(self, context):
+		if self.module is not None:
+			return self.instance
+		if self.nsdata is None and self.data is not None:
+			self.nsdata = ns(self.bytes)
+			self.data = None
+		if self.nsdata is None:
+			raise ImportError("Assembly data not loaded.")
+		self.context = context
+		bytes_len = self.nsdata.length()
+		# Work around for MakeTypedArray returning NaN floats when wrapped in a JSValue
+		self.jsdata = self.context.eval(f"new Uint8Array({bytes_len});").jsvalue 
+		context_ref, value_ref = jscore.jsvalue_get_refs(self.jsdata)
+		ex = c_void_p(None)
+		bytes_ptr = jscore.JSObjectGetTypedArrayBytesPtr(context_ref, value_ref, byref(ex))
+		if bytes_ptr is None and ex.value is not None:
+			raise ImportError(jscore.jsvalueref_to_py(context_ref, ex))
+		# read nsdata directly into Uint8Array backing bytes
+		self.nsdata.getBytes_length_(bytes_ptr, bytes_len)
+		self.module, self.name = self.context._load_module_array(self.jsdata, self.name)
+		self.nsdata = None
+		return self.instance
+		
+	@property
+	def instance(self):
+		if self.module is None:
+			return None
+		return self.module.instance
+
+	def free(self):
+		self.data = None
+		self.nsdata = None
+		self.context = None
+		self.jsdata = None
+		self.module = None
+	
+	def save(self, path):
+		path = Path(str(path))
+		if not path.is_absolute():
+			path = path.cwd().joinpath(path)
+		with open(path, "w") as module_file:
+			module_file.write(self.bytes)
+		
+	@classmethod
+	def from_file_py(cls, path):
+		path = Path(str(path))
+		if not path.is_absolute():
+			path = path.cwd().joinpath(path)
+		with open(path) as module_file:
+			data = module_file.read()
+			return cls(data, str(path))
+			
+	@classmethod
+	def from_file(cls, path, fileManager = None):
+		data = objc.nsdata_from_file(path, fileManager)
+		return cls(data, str(path))
+
 
 class wasm_context(jscore_context):
-	pass
+	def __init__(self, runtime):
+		super().__init__(runtime)
+		self._modules = None
+		self._modules_count = 0
+		self._wasm_modules = {}
+		
+	def allocate(self):
+		super().allocate()
+		self._modules = jscore.JSValue.valueWithNewObjectInContext_(self.context)
+		retain_global(self._modules)
+		self.context.globalObject().setValue_forProperty_(self._modules,"_jscore_wasm_modules_data")
+		self._load_module = self.eval("""
+		const _jscore_wasm_modules = {}
+		function _jscore_wasm_load(name){
+				const loaded_wasm_module = _jscore_wasm_modules[name];
+				if(loaded_wasm_module != null) {
+					return loaded_wasm_module;
+				}
+				const wasm_bin = _jscore_wasm_modules_data[name];
+				const wasm_module = new WebAssembly.Module(wasm_bin);
+				const wasm_instance = new WebAssembly.Instance(wasm_module);
+				const wasm_module_instance = {"bytes": wasm_bin, "module": wasm_module, "instance": wasm_instance};
+				_jscore_wasm_modules[name] = wasm_module_instance;
+				return wasm_module_instance;
+		};_jscore_wasm_load;""").value
+		
+	def deallocate(self):
+		release_global(self._modules)
+		self._modules = None
+		for name,module in self._wasm_modules.items():
+			module.free()
+		self._wasm_modules = None
+		super().deallocate()
+		
+	def module(self, name):
+		return self._wasm_modules.get(name)
+		
+	def module_instance(self, name):
+		module = self.module(name)
+		if module is None:
+			return None
+		return module.instance
+		
+	def load_module(self, module):
+		if not isinstance(module, wasm_module):
+			raise ArgumentError("Module must be wasm_module")
+		result = self._wasm_modules.get(module.name)
+		if result is not None:
+			return result
+		result = module.load(self)
+		self._wasm_modules[module.name] = module
+		return result
+	
+	def _load_module_array(self, module, name = None):
+		if not objc.ns_subclass_of(module, jscore.JSValue) or not jscore.jsvalue_is_array_type(module, jscore.kJSTypedArrayTypeUint8Array):
+			raise ArgumentError("Module array must be JSValue of an Uint8Array instance type.")
+		if name is None:
+			name = "wasm_module_"+str(self._modules_count)
+		self._modules.setValue_forProperty_(module, name)
+		result = self._load_module(name)
+		self._modules_count = self._modules_count + 1
+		return result, name
 
 
 class wasm_runtime(jscore_runtime):
@@ -1808,17 +2011,18 @@ if __name__ == '__main__':
 	print('"fndeftest" in context.js = ', "fndeftest" in context.js)
 	print("Result:", context.js.fndeftest, context.js.fndeftest())
 
-	context.eval_module_source("function bob() { return 10; }", "sourcetest.js")
-	print(context.js.bob)
+	context.eval_module_source("function module_source() { return 10; }", "sourcetest.js")
+	print(context.js.module_source)
 	#context.eval_module_file("./test.js")
 	#print(context.js.filetest)
 	#str_ref = jscore.str_to_jsstringref("test test")
 	#print(str_ref)
 	#py_str = jscore.jsstringref_to_py(str_ref)
 	#print(py_str)
-	script_ref = runtime.load_script_ref(source="function bill(){ return 232; }; [1, '2', new Date(), bill, {'a':[]}];" , url="reftest.js")
+	script_ref = runtime.load_script_ref(source="function script_ref(){ return 232; }; [1, '2', new Date(), script_ref, {'a':[]}];" , url="reftest.js")
 	value, exception = script_ref.eval(context)
-	print(value, exception, context.js.bill)
+	print(value, exception, context.js.script_ref)
+	
 	context.destroy()
 	runtime.destroy()
 	print(jscore._runtimes)
@@ -1827,6 +2031,9 @@ if __name__ == '__main__':
 	runtime = jscore.runtime(wasm_runtime)
 	context = runtime.context()
 	print(runtime, context)
+	
+	module = wasm_module([0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,3,2,1,0,5,3,1,0,1,7,8,1,4,116,101,115,116,0,0,10,16,1,14,0,32,0,65,1,54,2,0,32,0,40,2,0,11])
+	print(context.load_module(module))
 	
 	context.destroy()
 	runtime.destroy()
