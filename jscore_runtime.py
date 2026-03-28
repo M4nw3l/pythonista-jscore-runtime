@@ -280,7 +280,7 @@ class objc:
 		if count == 0:
 			if ptr is None:
 				return None
-			return cast(c_void_p(0), ptr) # NULL
+			return cast(c_void_p(None), ptr) # NULL
 		c_array_typ = typ * count
 		array = c_array_typ()
 		if items is None:
@@ -648,7 +648,7 @@ class jscore:
 	
 	@classmethod
 	def jsobjectref_to_py(cls, context_ref, value_ref):
-		ex = c_void_p(0)
+		ex = c_void_p(None)
 		value_ref = cls.JSValueToObject(context_ref, value_ref, byref(ex))
 		if cls.JSObjectIsFunction(context_ref, value_ref):
 			str_ref = cls.JSValueToStringCopy(context_ref, value_ref, byref(ex))
@@ -689,21 +689,21 @@ class jscore:
 		if cls.JSValueIsBoolean(context_ref, value_ref):
 			return cls.JSValueToBoolean(context_ref, value_ref)
 		if cls.JSValueIsNumber(context_ref, value_ref):
-			ex = c_void_p(0)
+			ex = c_void_p(None)
 			return cls.JSValueToNumber(context_ref, value_ref, byref(ex))
 		if cls.JSValueIsString(context_ref, value_ref):
-			ex = c_void_p(0)
+			ex = c_void_p(None)
 			str_ref = cls.JSValueToStringCopy(context_ref, value_ref, byref(ex))
 			if str_ref:
 				return cls.jsstringref_to_py(str_ref)
 			return ""
 		if cls.JSValueIsDate(context_ref, value_ref):
-			ex = c_void_p(0)
+			ex = c_void_p(None)
 			str_ref = cls.JSValueCreateJSONString(context_ref, value_ref, 0, byref(ex))
 			json_date = cls.jsstringref_to_py(str_ref)
 			return datetime.strptime(json_date, '"%Y-%m-%dT%H:%M:%S.%fZ"').replace(tzinfo=timezone.utc)
 		if cls.JSValueIsSymbol(context_ref, value_ref):
-			ex = c_void_p(0)
+			ex = c_void_p(None)
 			str_ref = cls.JSValueToStringCopy(context_ref, value_ref, byref(ex))
 			symbol = cls.jsstringref_to_py(str_ref)
 			return javascript_symbol(symbol)
@@ -717,6 +717,11 @@ class jscore:
 			return cls.JSValueMakeNull(context_ref)
 		if javascript_value.is_undefined(value):
 			return cls.JSValueMakeUndefined(context_ref)
+		if isinstance(value, c_void_p):
+			return value # assume a void pointer is a value ref
+		if objc.ns_subclass_of(value, cls.JSValue):
+			return value.JSValueRef() # return refs from existing JSValues
+		# convert
 		if isinstance(value, bool):
 			return cls.JSValueMakeBoolean(context_ref, value)
 		if isinstance(value, int) or isinstance(value, float):
@@ -732,7 +737,7 @@ class jscore:
 		if isinstance(value, bytes) or isinstance(value, list):
 			count = len(value)
 			items = objc.c_array(count, lambda i: cls.py_to_jsvalueref(context_ref, value[i]))
-			ex_ref = c_void_p(0)
+			ex_ref = c_void_p(None)
 			return cls.JSObjectMakeArray(context_ref, count, items, byref(ex_ref))
 		if isinstance(value, dict):
 			json_value = cls.py_to_js(value)
@@ -824,9 +829,9 @@ class javascript_function:
 		name_ref = jscore.str_to_jsstringref(fn_name)
 		body = body[body.index('{'):body.rindex('}')]
 		body_ref = jscore.str_to_jsstringref(body)
-		ex_ref = c_void_p(0)
+		ex_ref = c_void_p(None)
 		self.value_ref = jscore.JSObjectMakeFunction(self.context_ref, name_ref, params_count, params_refs, body_ref, None, 0, by_ref(ex_ref))
-		if ex_ref is not None:
+		if ex_ref.value is not None:
 			exception = jscore.jsvalueref_to_py(context_ref, ex_ref)
 			raise ImportError("Exception compiling function: {exception}")
 		return self.value_ref
@@ -835,6 +840,10 @@ class javascript_function:
 		if self.jsvalue is not None:
 			nsargs = ns(list(args))
 			value = self.jsvalue.callWithArguments_(nsargs)
+			exception = self.jsvalue.context().exception()
+			if exception is not None:
+				self.jsvalue.context.setException(None)
+				raise Exception(jscore.jsvalue_to_py(exception))
 			return javascript_value(value)
 		
 		if self.source is not None and self.value_ref is None:
@@ -849,8 +858,10 @@ class javascript_function:
 			if count > 0:
 				args_ref = objc.c_array(count, lambda i: jscore.py_to_jsvalueref(self.context_ref, args[i]))
 			this_ref = None
-			exception_ref = c_void_p(0)
+			exception_ref = c_void_p(None)
 			value_ref = jscore.JSObjectCallAsFunction(self.context_ref, self.value_ref, this_ref, count, args_ref, byref(exception_ref))
+			if exception_ref.value is not None:
+				raise Exception(jscore.jsvalueref_to_py(exception_ref))
 			return javascript_value(None, context_ref, value_ref)
 
 		raise NotImplementedError("Cannot call this type of javascript_function")
@@ -949,7 +960,7 @@ class jsscript_ref:
 		self.source = source
 		self.url_ref = jscore.str_to_jsstringref(url)
 		self.source_ref = jscore.str_to_jsstringref(source)
-		error_ref = c_void_p(0)
+		error_ref = c_void_p(None)
 		error_line = c_void_p(0)
 		script_ref = jscore.JSScriptCreateFromString(self.context_group_ref, self.url_ref, 0, self.source_ref, byref(error_ref), byref(error_line))
 		self.script_ref = script_ref
@@ -974,7 +985,7 @@ class jsscript_ref:
 			raise ImportError(f"Error importing script at {line}, {exception}")
 		this_ref = context.globalObject()
 		this_ref = this_ref.JSValueRef()
-		exception_ref = c_void_p(0)
+		exception_ref = c_void_p(None)
 		value_ref = jscore.JSScriptEvaluate(context_ref, self.script_ref, this_ref, byref(exception_ref))
 		value = jscore.jsvalueref_to_py(context_ref, value_ref)
 		exception = jscore.jsvalueref_to_py(context_ref, exception_ref)
@@ -1289,7 +1300,7 @@ class jscore_runtime:
 		if sourceUrl is None:
 			raise ValueError("A valid source url is required")
 		sourceUrl = nsurl(sourceUrl)
-		error = c_void_p(0)
+		error = c_void_p(None)
 		#bytecodeCache requires a data vault if specified, so we don't...
 		script = loader(scriptType, context, sourceUrl, None, self.vm, byref(error))
 		retain_global(script) # DO NOT release JSScripts this will cause a crash while vm is alive
