@@ -202,14 +202,20 @@ class objc:
 
 	@staticmethod
 	def ns_class(nsobject):
+		if not (isinstance(nsobject, c_void_p) or isinstance(nsobject, ObjCInstance)):
+			return None
 		objClass = ObjCInstance(object_getClass(nsobject))
 		objClassName = class_getName(objClass)
 		return objClass
 
 	@staticmethod
 	def ns_subclass_of(nsobject, objcClass, objClass=None):
+		if not (isinstance(nsobject, c_void_p) or isinstance(nsobject, ObjCInstance)):
+			return False
 		if objClass is None:
 			objClass = objc.ns_class(nsobject)
+		if objClass is None:
+			return False
 		return objClass.isSubclassOfClass_(objcClass)
 
 	@staticmethod
@@ -247,8 +253,10 @@ class objc:
 				value = objc.ns_to_py(values.objectAtIndex_(i))
 				items[key] = value
 			return items
-		className = class_getName(objClass)
-		raise NotImplementedError("Unhandled type {objClass} {nsobject}")
+		className = "unknown"
+		if objClass is not None:
+			className = class_getName(objClass)
+		raise NotImplementedError("Unhandled NSObject type {objClass} ({className}) for {nsobject}.")
 	
 	@staticmethod
 	def c_array(count, items = None, typ = c_byte, ptr = c_void_p):
@@ -418,6 +426,20 @@ class jscore:
 	JSObjectMakeArrayBufferWithBytesNoCopy = objc.c_func(lib.JSObjectMakeArrayBufferWithBytesNoCopy, c_void_p, c_void_p, c_void_p, c_size_t, c_void_p, c_void_p, c_void_p)
 	JSObjectGetArrayBufferByteLength = objc.c_func(lib.JSObjectGetArrayBufferByteLength, c_size_t, c_void_p, c_void_p, c_void_p)
 	JSObjectGetArrayBufferBytesPtr = objc.c_func(lib.JSObjectGetArrayBufferBytesPtr, c_void_p, c_void_p, c_void_p, c_void_p)
+	
+	kJSTypedArrayTypeInt8Array = 0
+	kJSTypedArrayTypeInt16Array = 1
+	kJSTypedArrayTypeInt32Array = 2
+	kJSTypedArrayTypeUint8Array = 3
+	kJSTypedArrayTypeUint8ClampedArray = 4
+	kJSTypedArrayTypeUint16Array = 5
+	kJSTypedArrayTypeUint32Array = 6
+	kJSTypedArrayTypeFloat32Array = 7
+	kJSTypedArrayTypeFloat64Array = 8
+	kJSTypedArrayTypeArrayBuffer = 9
+	kJSTypedArrayTypeNone = 10
+	kJSTypedArrayTypeBigInt64Array = 11
+	kJSTypedArrayTypeBigUint64Array = 12
 	
 	JSCheckScriptSyntax = objc.c_func(lib.JSCheckScriptSyntax, c_bool, c_void_p, c_void_p, c_void_p, c_int, c_void_p)
 	JSEvaluateScript = objc.c_func(lib.JSEvaluateScript, c_void_p, c_void_p, c_void_p, c_void_p, c_void_p, c_int, c_void_p)
@@ -839,7 +861,7 @@ class javascript_function:
 		return re.fullmatch("function[^\{]+\{[^\[]+\[native code\][^\}]+}", repr) is not None
 	
 	def __call__(self, *args):
-		return self.call().value
+		return self.call(*args).value
 
 	def __repr__(self):
 		if self.source is not None:
@@ -1599,7 +1621,6 @@ if __name__ == '__main__':
 				values["value"] = value
 				return valueMatch(expected, value, repr, values)
 			return False
-				
 		return True
 
 	def arrayMatch(expected, value):
@@ -1757,7 +1778,7 @@ if __name__ == '__main__':
 	context.js.interop_obj = { 'test':{'object':[]}, 'int':1, 'double':2.45 }
 	print("Result:", context.js.interop_obj)
 	
-	header("Modify object", True)
+	header("Modify object")
 	print("context.js.interop_obj = { 'test':{'object':[1,2,3]}, 'int':1, 'double':2.45 }")
 	context.js.interop_obj = { 'test':{'object':[1,2,3]}, 'int':1, 'double':2.45 }
 	print("Result:", context.js.interop_obj)
@@ -1799,4 +1820,3 @@ if __name__ == '__main__':
 	context.destroy()
 	runtime.destroy()
 	print(jscore._runtimes)
-
