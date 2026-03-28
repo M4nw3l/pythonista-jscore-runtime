@@ -1636,6 +1636,7 @@ class wasm_module:
 		self.context = None
 		self.jsdata = None
 		self.module = None
+		self.instance = None
 		if objc.ns_subclass_of(data, NSData):
 			self.nsdata = data
 		elif isinstance(data, list) or isinstance(data, bytes):
@@ -1689,14 +1690,19 @@ class wasm_module:
 		# read nsdata directly into Uint8Array backing bytes
 		self.nsdata.getBytes_length_(bytes_ptr, bytes_len)
 		self.module, self.name = self.context._load_module_array(self.jsdata, self.name)
+		self.instance = self.module.instance
 		self.nsdata = None
 		return self.instance
 		
 	@property
-	def instance(self):
-		if self.module is None:
-			return None
-		return self.module.instance
+	def loaded(self):
+		return self.instance is not None
+		
+	@property
+	def exports(self):
+		if not self.loaded:
+			return {}
+		return self.instance.exports
 
 	def free(self):
 		self.data = None
@@ -1704,6 +1710,7 @@ class wasm_module:
 		self.context = None
 		self.jsdata = None
 		self.module = None
+		self.instance = None
 	
 	def save(self, path):
 		path = Path(str(path))
@@ -1761,7 +1768,11 @@ class wasm_context(jscore_context):
 			module.free()
 		self._wasm_modules = None
 		super().deallocate()
-		
+	
+	@property
+	def modules(self):
+		return dict(self._wasm_modules)
+	
 	def module(self, name):
 		return self._wasm_modules.get(name)
 		
@@ -2033,7 +2044,8 @@ if __name__ == '__main__':
 	print(runtime, context)
 	
 	module = wasm_module([0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,3,2,1,0,5,3,1,0,1,7,8,1,4,116,101,115,116,0,0,10,16,1,14,0,32,0,65,1,54,2,0,32,0,40,2,0,11])
-	print(context.load_module(module))
+	context.load_module(module)
+	print(module.exports)
 	
 	context.destroy()
 	runtime.destroy()
