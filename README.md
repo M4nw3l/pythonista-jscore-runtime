@@ -23,7 +23,6 @@ with (jscore.runtime() as runtime, runtime.context() as context):
 # ['hello', 'from', 'javascript', 1, 2.2, 3.333333, {'object': 'value', 'nested': {'obj': ['array', [], {}]}}]
 
 ```
-Currently the main runtime and context implementation for the primary JavaScript evaluation and interop mechanism with JavaScriptCore is mostly working. WebAssembly modules and instances may also be instantiated and evaluated directly from JavaScript at the moment. WASM specific classes for runtime and context are placeholders currently. 
 
 ## Installation
 
@@ -38,7 +37,7 @@ pip install pythonista-jscore-runtime
 -->
 
 ## Usage
-
+### Javascript Runtime
 JSCore Runtime supports both the context management and explicit create/destroy usage paradigms. 
 Alongside also automatically managed (singleton) quick/convenience evaluation and more explicit/multiple virtual machine and contexts instancing for advanced control. 
 
@@ -98,8 +97,86 @@ Defined functions may be called from Python:
 context.js.my_function() # returns 1234
 ```
 
+### WebAssembly Runtime
+The `wasm_runtime` class, and its associated `wasm_context` and `wasm_module` classes allow WebAssembly modules to be loaded 
+with files and byte arrays from Python. They efficiently load WebAssembly modules via a direct buffer copy of an NSData objects bytes into a Uint8Arrays backing store in JavaScriptCore. Allowing a module and its instance to then instantiated, and its exports are bridged directly to Python. Interop with JavaScriptCore allows WebAssembly functions to be mapped and called as any other normal Python callable function. WebAssembly methods are exposed from JavaScriptCore as `function() { [Native Code] }` bodied functions. The performance should be close to excuting code natively but is still being interpreted by JavaScriptCore. It is also likely that JavaScriptCore's WebAssembly runtime may be subject to some restrictions imposed by Apple's general security policies. 
+
+To create a `wasm_context` to instantiate `wasm_module` instances from a `wasm_runtime` instance needs to be created first. This currently works the same way as the `javascript_runtime`. 
+
+A singleton runtime instance, with a lifetime of the program, may be obtained from the `jscore.runtime` accessor.
+```python
+runtime = jscore.runtime(wasm_runtime)
+```
+
+Alternatively a `wasm_runtime` instance may also be created and managed independently. Similarly to the `javascript_runtime` it will contain a pointer to a separate JSVirtualMachine instance.
+
+```python
+runtime = wasm_runtime()
+```
+
+A `wasm_context` may be obtained from runtime instance:
+
+```python
+context = runtime.context()
+```
+
+Although a `wasm_context` may execute JavaScript and vice versa, `wasm_runtime` and `wasm_context` are designed to integrate Python with WebAssembly as a first class runtime, without need for any JavaScript by default, to load and call WebAssembly modules from Python.
+
+WebAssembly modules can be loaded from files or as raw bytes with the `wasm_module` class and `wasm_context.load_module` function.
+
+```python
+module_file = wasm_module.from_file("./path/to/module.wasm")
+module_bytes = wasm_module(b'\0asm\1\0\0\0'+b'[module_body]', 'optional_module_name_or_path')
+module_data = wasm_module([0, 97, 115, 109, 1, 0, 0, 0, ...], 'optional_module_name_or_path')
+
+module_instance = module_file
+context.load(module_instance)
+
+# once a module has been loaded its instance and exports are available from properties
+print(module_instance.instance)
+print(module_instance.exports)
+
+```
+Previously loaded module instances may also be retrieved from the context:
+```python
+loaded_module = context.module("module_name_or_path")
+```
+
+WebAssembly exported functions are invoked as a regular Python function using an underlying `javascript_function` instance.
+
+```python
+module = wasm_module.from_file("./path/to/module.wasm")
+context.load(module)
+
+module.exports.exported_function()
+module.exports.exported_function_with_parameters(convertible, python, args)
+```
+Please bear in mind at the moment this functionality is more experimental. It is currently serving as a loading mechansim thats better than passing WebAssembly modules bytes as strings or base64 strings to JavaScriptCore. 
+
+They are exposed to JavaScriptCore through a global lookup, `_jscore_wasm_modules_data` keyed by a unique module name.
+Module names are generated as `wasm_module_[loaded_count]` currently if one is not provided. 
+There is no guarentee the same module bytes will receive the same generated name if a name is not otherwise specified.
+
+```javascript
+const _jscore_wasm_modules = {}
+function _jscore_wasm_load(name){
+    const loaded_wasm_module = _jscore_wasm_modules[name];
+		if(loaded_wasm_module != null) {
+			return loaded_wasm_module;
+		}
+		const wasm_bin = _jscore_wasm_modules_data[name];
+		const wasm_module = new WebAssembly.Module(wasm_bin);
+		const wasm_instance = new WebAssembly.Instance(wasm_module);
+		const wasm_module_instance = {"bytes": wasm_bin, "module": wasm_module, "instance": wasm_instance};
+		_jscore_wasm_modules[name] = wasm_module_instance;
+		return wasm_module_instance;
+}
+```
+The above function is currently acting as the module loader on JavaScriptCore's side, it is defined in the context by `wasm_context` upon its allocation. Then ultimately called by loading a module with `wasm_context.load_module` to create the `WebAssembly.Module` and `WebAssebly.Instance` instances in JavaScript. Libraries / imports mappings are not currently implemented.
+
 ## Known issues
 - Loading javascript files from remote sources / cdns etc is not implemented (yet).
 - Modules and scripts loading may not work correctly for some javascript libraries and they may need manual adjustments to work currently.
 - ModulesLoaderDelegate is using a private protcol / api as there is no other way to access the functionality otherwise.
 - JSScript source code strings are C++ objects which are more awkward structures to read with ctypes. A work around of separately loading a copy of the script source is used at the moment, so any module preprocessing performed when loading a JSScript is lost currently.
+- WebAssembly module imports mapping mechanisms are missing / manual.
