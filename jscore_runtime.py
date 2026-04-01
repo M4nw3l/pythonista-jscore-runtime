@@ -52,7 +52,7 @@ class objc:
 	def c_func(func, restype, *argtypes):
 		func.restype = restype
 		func.argtypes = argtypes
-		return func
+		return staticmethod(func)
 	
 	objc_allocateProtocol = c_func(c.objc_allocateProtocol, c_void_p, c_char_p)
 	objc_protocol_addMethodDescription = c_func(c.protocol_addMethodDescription, None, c_void_p, c_void_p, c_char_p, c_bool, c_bool)
@@ -299,8 +299,13 @@ class objc:
 		if ptr is None:
 			return array
 		return cast(array, ptr)
-		
-	def nsdata_from_file(cls, path, fileManager = None):
+	
+	@staticmethod
+	def c_array_p(count, items = None, typ = c_void_p, ptr = c_void_p):
+		return objc.c_array(count, items, typ, ptr)
+	
+	@staticmethod
+	def nsdata_from_file(path, fileManager = None):
 		if fileManager is None:
 			fileManager = NSFileManager.defaultManager()
 		path = Path(str(path))
@@ -334,6 +339,7 @@ class jscore:
 	JSContextGroupRetain = objc.c_func(lib.JSContextGroupRetain, c_void_p, c_void_p)
 	JSContextGroupRelease = objc.c_func(lib.JSContextGroupRelease, None, c_void_p)
 	JSContextGetGlobalContext = objc.c_func(lib.JSContextGetGlobalContext, c_void_p, c_void_p)
+	JSContextGetGlobalObject = objc.c_func(lib.JSContextGetGlobalObject, c_void_p, c_void_p)
 	
 	JSGlobalContextCreate = objc.c_func(lib.JSGlobalContextCreate, c_void_p, c_void_p)
 	JSGlobalContextCreateInGroup = objc.c_func(lib.JSGlobalContextCreateInGroup, c_void_p, c_void_p, c_void_p)
@@ -345,8 +351,8 @@ class jscore:
 	JSGlobalContextSetInspectable = objc.c_func(lib.JSGlobalContextSetInspectable, None, c_void_p, c_bool)
 	
 	JSChar_p = POINTER(c_ushort)
-	JSStringCreateWithCharacters = objc.c_func(lib.JSStringCreateWithCharacters, c_void_p, JSChar_p, c_size_t)
-	JSStringCreateWithUTF8CString = objc.c_func(lib.JSStringCreateWithUTF8CString, c_void_p, c_char_p)
+	JSStringCreateWithCharacters = objc.c_func(lib.JSStringCreateWithCharacters, c_void_p, c_void_p, c_size_t)
+	JSStringCreateWithUTF8CString = objc.c_func(lib.JSStringCreateWithUTF8CString, c_void_p, c_void_p)
 	JSStringRetain = objc.c_func(lib.JSStringRetain, c_void_p, c_void_p)
 	JSStringRelease = objc.c_func(lib.JSStringRelease, None, c_void_p)
 	JSStringGetLength = objc.c_func(lib.JSStringGetLength, c_size_t, c_void_p)
@@ -562,6 +568,19 @@ class jscore:
 		if runtime is rt: # remove destroyed runtime if its a tracked singleton instance
 			del jscore._runtimes[key]
 	
+	@classmethod
+	def context_eval(cls, context, script, sourceUrl = None):
+		result = None
+		if sourceUrl is None or sourceUrl.strip() == '':
+			result = context.evaluateScript_(script)
+		else:
+			result = context.evaluateScript_withSourceUrl_(script, sourceUrl)
+		result = ObjCInstance(result)
+		ex = context.exception()
+		if ex is not None:
+			context.setException(None) # clear exception if set
+		return result, ex
+	
 	# jscore values conversions 
 	@classmethod
 	def jsstringref_to_py(cls, str_ref):
@@ -577,10 +596,9 @@ class jscore:
 			return None
 		str_py = str(str_py)
 		str_len = len(str_py)
-		str_bytes = str_py.encode("utf-16")
-		str_utf16 = objc.c_array(str_bytes, ptr=cls.JSChar_p)
+		str_utf16 = objc.c_array(str_py.encode("utf-16le"))
 		str_ref = jscore.JSStringCreateWithCharacters(str_utf16, str_len)
-		return jscore.JSStringRetain(str_ref)
+		return cast(cls.JSStringRetain(str_ref), c_void_p)
 	
 	@classmethod
 	def jsobjectref_keys(cls, context_ref, value_ref):
@@ -605,22 +623,7 @@ class jscore:
 		context_ref, value_ref = cls.jsvalue_get_refs(value)
 		if jscore.JSObjectIsFunction(context_ref, value_ref):
 			return javascript_function(value, context_ref, value_ref)
-		keys = cls.jsobjectref_keys(context_ref, value_ref)
-		obj = None
-		if value.isArray():
-			obj = []
-			for key in keys:
-				jsvalue = value.valueForProperty_(key)
-				obj.append(cls.jsvalue_to_py(jsvalue))
-		else:
-			prototype_ref = cls.JSObjectGetPrototype(context_ref, value_ref)
-			obj = cls.jsvalueref_to_py(context_ref, prototype_ref)
-			if javascript_value.is_null_or_undefined(obj):
-				obj = {}
-			for key in keys:
-				jsvalue = value.valueForProperty_(key)
-				obj[key] = cls.jsvalue_to_py(jsvalue)
-		return obj
+		return cls.jsobjectref_to_py(context_ref, value_ref)
 
 	@classmethod
 	def jsvalue_to_py(cls, value):
@@ -652,6 +655,8 @@ class jscore:
 		
 	@classmethod
 	def jsvalue_is_array_type(cls, value, typedArrayType):
+		if not objc.ns_subclass_of(value, jscore.JSValue):
+			return False
 		context_ref, value_ref = cls.jsvalue_get_refs(value)
 		ex = c_void_p(None)
 		arrayType = cls.JSValueGetTypedArrayType(context_ref, value_ref, byref(ex))
@@ -732,7 +737,7 @@ class jscore:
 		raise NotImplementedError("Unknown value_ref type")
 
 	@classmethod
-	def py_to_jsvalueref(cls, context_ref, value):
+	def _py_to_jsvalueref(cls, context_ref, value):
 		if value is None:
 			return cls.JSValueMakeNull(context_ref)
 		if javascript_value.is_undefined(value):
@@ -756,17 +761,68 @@ class jscore:
 			return cls.JSValueMakeString(context_ref, str_ref)
 		if isinstance(value, bytes) or isinstance(value, list):
 			count = len(value)
-			items = objc.c_array(count, lambda i: cls.py_to_jsvalueref(context_ref, value[i]))
+			items = objc.c_array_p(count, lambda i: cls.py_to_jsvalueref(context_ref, value[i]))
 			ex_ref = c_void_p(None)
 			return cls.JSObjectMakeArray(context_ref, count, items, byref(ex_ref))
 		if isinstance(value, dict):
 			json_value = cls.py_to_js(value)
-			str_ref = cls.str_to_jsstringref(json_value)
-			return cls.JSValueMakeFromJSONString(context_ref, str_ref)
+			value_ref = cls.JSObjectMake(context_ref, None, None)
+			ex_ref = c_void_p(None)
+			for k,v in value.items():
+				key_ref = cls.str_to_jsstringref(k)
+				val_ref = cls.py_to_jsvalueref(context_ref, v)
+				cls.JSObjectSetProperty(context_ref, value_ref, key_ref, val_ref, 0, byref(ex_ref))
+			return value_ref
 		if isinstance(value, javascript_function):
 			source = str(value)
 			value_ref = javascript_function.from_source(source, context_ref).compile()
 			return value_ref
+		typ = type(value)
+		raise NotImplementedError(f"Type '{typ}' for value '{value}' not supported.")
+		
+	@classmethod
+	def py_to_jsvalueref(cls, context_ref, value):
+		value_ref = cls._py_to_jsvalueref(context_ref, value)
+		#cls.JSValueProtect(context_ref, value_ref)
+		return cast(value_ref, c_void_p) # ensure a c_void_p
+	
+	@classmethod
+	def py_to_jsvalue(cls, context, value):
+		if value is None:
+			return cls.JSValue.valueWithNullInContext_(context)
+		if javascript_value.is_undefined(value):
+			return cls.JSValue.valueWithUndefinedInContext_(context)
+		if objc.ns_subclass_of(value, jscore.JSValue):
+			return value # pass back jsvalue instances as-is
+		if isinstance(value, bool):
+			return cls.JSValue.valueWithBool_inContext_(value, context)
+		if isinstance(value, int) or isinstance(value, float) or isinstance(value, str):
+			return cls.JSValue.valueWithObject_inContext_(ns(value), context)
+		if isinstance(value, datetime):
+			timestamp = value.timestamp()
+			return cls.JSValue.valueWithObject_inContext_(cls.initWithTimeIntervalSince1970_(timestamp), context)
+		if isinstance(value, javascript_function):
+			source = str(value)
+			#value_ref = javascript_function.from_source(source, context_ref).compile()
+			return cls.JSValue.valueWithNullInContext_(context)
+		if isinstance(value, dict):
+			jsvalue = cls.JSValue.valueWithNewObjectInContext_(context)
+			for k,v in value.items():
+				val = cls.py_to_jsvalue(context, v)
+				jsvalue.setValue_forProperty_(val, k)
+			return jsvalue
+		if isinstance(value, bytes):
+			jsvalue = cls.JSValue.valueWithNewArrayInContext_(context) # should probably be typed array for a buffer copy
+			for i in range(len(value)):
+				val = cls.py_to_jsvalue(context, int(value[i]))
+				jsvalue.setValue_atIndex_(i, val)
+			return jsvalue
+		if isinstance(value, list):
+			jsvalue = cls.JSValue.valueWithNewArrayInContext_(context)
+			for i in range(len(value)):
+				val = cls.py_to_jsvalue(context, value[i])
+				jsvalue.setValue_atIndex_(i, val)
+			return jsvalue
 		typ = type(value)
 		raise NotImplementedError(f"Type '{typ}' for value '{value}' not supported.")
 
@@ -855,15 +911,40 @@ class javascript_function:
 			exception = jscore.jsvalueref_to_py(context_ref, ex_ref)
 			raise ImportError("Exception compiling function: {exception}")
 		return self.value_ref
+	
+	def js_arg(self, context, arg):
+		if javascript_value.is_null_or_undefined(arg):
+			return jscore.py_to_jsvalue(context, arg)
+		if isinstance(arg, dict):
+			copy = {}
+			for k,v in arg.items():
+				copy[k]=self.js_arg(context, v)
+			return copy
+		if isinstance(arg, list):
+			copy = []
+			for i in range(len(arg)):
+				copy.append(self.js_arg(context, arg[i]))
+			return copy
+		if isinstance(arg, javascript_function):
+			return jscore.py_to_jsvalue(context, arg)
+		return arg
+	
+	def js_args(self, context, args):
+		args = list(args)
+		args = self.js_arg(context, args)
+		nsargs = ns(args)
+		return nsargs
 
 	def call(self, *args):
 		if self.jsvalue is not None:
-			nsargs = ns(list(args))
+			context = self.jsvalue.context()
+			nsargs = self.js_args(context, args)
+			self.jsvalue.context().setException_(None)
 			value = self.jsvalue.callWithArguments_(nsargs)
 			exception = self.jsvalue.context().exception()
 			if exception is not None:
-				self.jsvalue.context.setException(None)
-				raise Exception(jscore.jsvalue_to_py(exception))
+				self.jsvalue.context().setException_(None)
+				raise Exception(str(exception))
 			return javascript_value(value)
 		
 		if self.source is not None and self.value_ref is None:
@@ -882,7 +963,7 @@ class javascript_function:
 			value_ref = jscore.JSObjectCallAsFunction(self.context_ref, self.value_ref, this_ref, count, args_ref, byref(exception_ref))
 			if exception_ref.value is not None:
 				raise Exception(jscore.jsvalueref_to_py(exception_ref))
-			return javascript_value(None, context_ref, value_ref)
+			return javascript_value(None, self.context_ref, value_ref)
 
 		raise NotImplementedError("Cannot call this type of javascript_function")
 
@@ -1181,15 +1262,7 @@ class jscore_context:
 	
 	def eval(self, script, sourceUrl=None):
 		self.alloc()
-		result = None
-		if sourceUrl is None or sourceUrl.strip() == '':
-			result = self.context.evaluateScript_(script)
-		else:
-			result = self.context.evaluateScript_withSourceUrl_(script, sourceUrl)
-		result = ObjCInstance(result)
-		ex = self.context.exception()
-		if ex is not None:
-			self.context.setException(None) # clear exception if set
+		result, ex = jscore.context_eval(self.context, script, sourceUrl)
 		result = self.eval_result(javascript_value(result), ex)
 		return result
 	
@@ -1627,7 +1700,7 @@ class wasm_module:
 				return True
 		return False
 	
-	def __init__(self, data = None, name = None):
+	def __init__(self, data = None, name = None, imports = {}):
 		self.name = name
 		if self.name is not None:
 			self.name = str(name)
@@ -1635,6 +1708,7 @@ class wasm_module:
 		self.nsdata = None
 		self.context = None
 		self.jsdata = None
+		self._imports = imports
 		self.module = None
 		self.instance = None
 		if objc.ns_subclass_of(data, NSData):
@@ -1666,8 +1740,6 @@ class wasm_module:
 			return bytes
 		if self.nsdata is not None:
 			return nsdata_to_bytes(self.nsdata)
-		if self.module is not None:
-			return self.module.bytes
 		return b''
 		
 	def load(self, context):
@@ -1689,14 +1761,17 @@ class wasm_module:
 			raise ImportError(jscore.jsvalueref_to_py(context_ref, ex))
 		# read nsdata directly into Uint8Array backing bytes
 		self.nsdata.getBytes_length_(bytes_ptr, bytes_len)
-		self.module, self.name = self.context._load_module_array(self.jsdata, self.name)
+		self.module, self.name = self.context._load_module_array(self.jsdata, self.name, self.imports)
 		self.instance = self.module.instance
-		self.nsdata = None
 		return self.instance
 		
 	@property
 	def loaded(self):
 		return self.instance is not None
+		
+	@property
+	def imports(self):
+		return self._imports
 		
 	@property
 	def exports(self):
@@ -1737,44 +1812,38 @@ class wasm_module:
 class wasm_context(jscore_context):
 	def __init__(self, runtime):
 		super().__init__(runtime)
-		self._modules = None
-		self._modules_count = 0
-		self._wasm_modules = {}
+		self._modules = {}
+		self._imports = {}
 		
 	def allocate(self):
 		super().allocate()
-		self._modules = jscore.JSValue.valueWithNewObjectInContext_(self.context)
-		retain_global(self._modules)
-		self.context.globalObject().setValue_forProperty_(self._modules,"_jscore_wasm_modules_data")
 		self._load_module = self.eval("""
 		const _jscore_wasm_modules = {}
-		function _jscore_wasm_load(name){
-				const loaded_wasm_module = _jscore_wasm_modules[name];
-				if(loaded_wasm_module != null) {
-					return loaded_wasm_module;
-				}
-				const wasm_bin = _jscore_wasm_modules_data[name];
+		function _jscore_wasm_load(name, wasm_bin, namespace){
+				if(namespace === null) { namespace = {}; }
 				const wasm_module = new WebAssembly.Module(wasm_bin);
-				const wasm_instance = new WebAssembly.Instance(wasm_module);
-				const wasm_module_instance = {"bytes": wasm_bin, "module": wasm_module, "instance": wasm_instance};
-				_jscore_wasm_modules[name] = wasm_module_instance;
+				const wasm_instance = new WebAssembly.Instance(wasm_module, namespace);
+				const wasm_module_instance = {"instance": wasm_instance, "namespace": namespace, "module": wasm_module};
+				_jscore_wasm_modules[name] = wasm_module_instance; // ensure module remains in scope
 				return wasm_module_instance;
 		};_jscore_wasm_load;""").value
 		
 	def deallocate(self):
-		release_global(self._modules)
-		self._modules = None
-		for name,module in self._wasm_modules.items():
+		for name,module in self._modules.items():
 			module.free()
-		self._wasm_modules = None
+		self._modules = None
 		super().deallocate()
 	
 	@property
+	def imports(self):
+		return self._imports
+	
+	@property
 	def modules(self):
-		return dict(self._wasm_modules)
+		return dict(self._modules)
 	
 	def module(self, name):
-		return self._wasm_modules.get(name)
+		return self._modules.get(name)
 		
 	def module_instance(self, name):
 		module = self.module(name)
@@ -1785,21 +1854,37 @@ class wasm_context(jscore_context):
 	def load_module(self, module):
 		if not isinstance(module, wasm_module):
 			raise ArgumentError("Module must be wasm_module")
-		result = self._wasm_modules.get(module.name)
+		result = self._modules.get(module.name)
 		if result is not None:
 			return result
 		result = module.load(self)
-		self._wasm_modules[module.name] = module
+		self._modules[module.name] = module
 		return result
 	
-	def _load_module_array(self, module, name = None):
-		if not objc.ns_subclass_of(module, jscore.JSValue) or not jscore.jsvalue_is_array_type(module, jscore.kJSTypedArrayTypeUint8Array):
+	def _create_imports_namespace(self, imports = None):
+		namespace = {}
+		for k, v in self.imports.items():
+			namespace[k] = v
+		if imports is None:
+			imports = {}
+		for k, v in imports.items():
+			namespace[k] = v
+		if len(namespace) == 0:
+			return None
+		jsnamespace = jscore.py_to_jsvalue(self.context, namespace)
+		return jsnamespace
+		
+	def _add_module_to_global_namespace(self, module, name): #?
+		pass
+	
+	def _load_module_array(self, module_data, name = None, imports = None):
+		if not jscore.jsvalue_is_array_type(module_data, jscore.kJSTypedArrayTypeUint8Array):
 			raise ArgumentError("Module array must be JSValue of an Uint8Array instance type.")
 		if name is None:
-			name = "wasm_module_"+str(self._modules_count)
-		self._modules.setValue_forProperty_(module, name)
-		result = self._load_module(name)
-		self._modules_count = self._modules_count + 1
+			name = "wasm_module_"+str(len(self._modules))
+		namespace = self._create_imports_namespace(imports)
+		result = self._load_module(name, module_data, namespace)
+		self._add_module_to_global_namespace(result, name)
 		return result, name
 
 
@@ -2033,7 +2118,6 @@ if __name__ == '__main__':
 	script_ref = runtime.load_script_ref(source="function script_ref(){ return 232; }; [1, '2', new Date(), script_ref, {'a':[]}];" , url="reftest.js")
 	value, exception = script_ref.eval(context)
 	print(value, exception, context.js.script_ref)
-	
 	context.destroy()
 	runtime.destroy()
 	print(jscore._runtimes)
