@@ -802,9 +802,16 @@ class jscore:
 			timestamp = value.timestamp()
 			return cls.JSValue.valueWithObject_inContext_(cls.initWithTimeIntervalSince1970_(timestamp), context)
 		if isinstance(value, javascript_function):
+			jsvalue = value.jsvalue
+			if jsvalue is not None:
+				return jsvalue
+			if value.is_native:
+				raise ValueError("Cannot evaluate native functions (this shouldn't be reachable!')")
 			source = str(value)
-			#value_ref = javascript_function.from_source(source, context_ref).compile()
-			return cls.JSValue.valueWithNullInContext_(context)
+			# this obtains a new jsvalue for a javascript function by evaluating it in the context, 
+			# further escaping and resolving may be required here...
+			jsvalue, ex  = cls.context_eval(context, f'(function() {{ return ({source}); }})()') 
+			return jsvalue
 		if isinstance(value, dict):
 			jsvalue = cls.JSValue.valueWithNewObjectInContext_(context)
 			for k,v in value.items():
@@ -885,8 +892,10 @@ class javascript_function:
 		self.value_ref = value_ref
 		self.source = source
 
-	def compile(self):
-		if self.context_ref is None:
+	def compile(self, context_ref = None):
+		if context_ref is None:
+			context_ref = self.context_ref
+		if context_ref is None:
 			raise ImportError("Cannot compile function from source without context_ref")
 		if self.source is None:
 			raise ImportError("Cannot compile function with no source")
@@ -906,7 +915,8 @@ class javascript_function:
 		body = body[body.index('{'):body.rindex('}')]
 		body_ref = jscore.str_to_jsstringref(body)
 		ex_ref = c_void_p(None)
-		self.value_ref = jscore.JSObjectMakeFunction(self.context_ref, name_ref, params_count, params_refs, body_ref, None, 0, by_ref(ex_ref))
+		self.value_ref = jscore.JSObjectMakeFunction(context_ref, name_ref, params_count, params_refs, body_ref, None, 0, by_ref(ex_ref))
+		self.context_ref = context_ref
 		if ex_ref.value is not None:
 			exception = jscore.jsvalueref_to_py(context_ref, ex_ref)
 			raise ImportError("Exception compiling function: {exception}")
@@ -1703,7 +1713,7 @@ class wasm_module:
 	def __init__(self, data = None, name = None, imports = {}):
 		self.name = name
 		if self.name is not None:
-			self.name = str(name)
+			self.name = wasm_module.get_module_name(self.name)
 		self.data = None
 		self.nsdata = None
 		self.context = None
@@ -1793,7 +1803,17 @@ class wasm_module:
 			path = path.cwd().joinpath(path)
 		with open(path, "w") as module_file:
 			module_file.write(self.bytes)
-		
+	
+	@classmethod
+	def get_module_name(cls, path):
+		path = str(path)
+		if '/' not in path and '.' not in path:
+			return path
+		name = Path(str(path)).name.split('.wasm')[0]
+		if '.' in name:
+			name = name.split('.')[0]
+		return name
+	
 	@classmethod
 	def from_file_py(cls, path):
 		path = Path(str(path))
@@ -1801,12 +1821,14 @@ class wasm_module:
 			path = path.cwd().joinpath(path)
 		with open(path) as module_file:
 			data = module_file.read()
-			return cls(data, str(path))
+			name = cls.get_module_name(path)
+			return cls(data, name)
 			
 	@classmethod
 	def from_file(cls, path, fileManager = None):
 		data = objc.nsdata_from_file(path, fileManager)
-		return cls(data, str(path))
+		name = cls.get_module_name(path)
+		return cls(data, name)
 
 
 class wasm_context(jscore_context):
@@ -1852,6 +1874,8 @@ class wasm_context(jscore_context):
 		return module.instance
 		
 	def load_module(self, module):
+		if isinstance(module, Path):
+			module = wasm_module.from_file(module)
 		if not isinstance(module, wasm_module):
 			raise ArgumentError("Module must be wasm_module")
 		result = self._modules.get(module.name)
@@ -2130,7 +2154,16 @@ if __name__ == '__main__':
 	module = wasm_module([0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,3,2,1,0,5,3,1,0,1,7,8,1,4,116,101,115,116,0,0,10,16,1,14,0,32,0,65,1,54,2,0,32,0,40,2,0,11])
 	context.load_module(module)
 	print(module.exports)
-	
+
+	#https://developer.mozilla.org/en-US/docs/WebAssembly/Guides/Using_the_JavaScript_API
+	simple_module_path = Path("./simple.wasm")
+	if simple_module_path.exists():
+		header("simple.wasm")
+		simple_module = wasm_module.from_file("./simple.wasm")
+		simple_module.imports["my_namespace"] = { "imported_func": javascript_function.from_source('function(val) { }') }
+		context.load_module(simple_module)
+		print(simple_module.exports)
+
 	context.destroy()
 	runtime.destroy()
 	print(jscore._runtimes)
