@@ -1692,6 +1692,47 @@ class javascript_runtime(jscore_runtime):
 		return javascript_context(self)
 
 # wasm (WebAssembly)
+class wasm_namespace:
+	def __init__(self, imports = None):
+		if imports is None:
+			imports = {}
+		self.___imports___ = imports
+		self.___init___ = True
+		
+	def ___get___(self, key):
+		value = self.___imports___.get(key, javascript_value.undefined)
+		if javascript_value.is_undefined(value):
+			value = {}
+			self.___set___(key, value)
+		if isinstance(value, dict):
+			return wasm_namespace(value)
+		return value
+		
+	def ___set___(self, key, value):
+		self.___imports___[key] = value
+
+	def __getattr__(self, key):
+		return self.___get___(key)
+
+	def __setattr__(self, key, value):
+		if not self.__dict__.get("___init___", False):
+			super().__setattr__(key, value)
+		else:
+			self.___set___(key, value)
+	
+	def __contains__(self, key):
+		value = self.___get___(key)
+		return not javascript_value.is_undefined(value)
+	
+	def __getitem__(self, key):
+		value = self.___get___(key)
+		if javascript_value.is_undefined(value):
+			raise IndexError(f"'{key}' is undefined.")
+		return value
+		
+	def __setitem__(self, key, value):
+		return self.___set___(key, value)
+	
 class wasm_module:
 	magic = b'\0asm'
 	version = b'\1\0\0\0'
@@ -1719,6 +1760,7 @@ class wasm_module:
 		self.context = None
 		self.jsdata = None
 		self._imports = imports
+		self._namespace = wasm_namespace(self._imports)
 		self.module = None
 		self.instance = None
 		if objc.ns_subclass_of(data, NSData):
@@ -1771,7 +1813,7 @@ class wasm_module:
 			raise ImportError(jscore.jsvalueref_to_py(context_ref, ex))
 		# read nsdata directly into Uint8Array backing bytes
 		self.nsdata.getBytes_length_(bytes_ptr, bytes_len)
-		self.module, self.name = self.context._load_module_array(self.jsdata, self.name, self.imports)
+		self.module, self.name = self.context._load_module_array(self.jsdata, self.name, self._imports)
 		self.instance = self.module.instance
 		return self.instance
 		
@@ -1781,7 +1823,7 @@ class wasm_module:
 		
 	@property
 	def imports(self):
-		return self._imports
+		return self._namespace
 		
 	@property
 	def exports(self):
@@ -1836,6 +1878,7 @@ class wasm_context(jscore_context):
 		super().__init__(runtime)
 		self._modules = {}
 		self._imports = {}
+		self._namespace = wasm_namespace(self._imports)
 		
 	def allocate(self):
 		super().allocate()
@@ -1858,7 +1901,7 @@ class wasm_context(jscore_context):
 	
 	@property
 	def imports(self):
-		return self._imports
+		return self._namespace
 	
 	@property
 	def modules(self):
@@ -1887,7 +1930,7 @@ class wasm_context(jscore_context):
 	
 	def _create_imports_namespace(self, imports = None):
 		namespace = {}
-		for k, v in self.imports.items():
+		for k, v in self._imports.items():
 			namespace[k] = v
 		if imports is None:
 			imports = {}
@@ -2160,7 +2203,7 @@ if __name__ == '__main__':
 	if simple_module_path.exists():
 		header("simple.wasm")
 		simple_module = wasm_module.from_file("./simple.wasm")
-		simple_module.imports["my_namespace"] = { "imported_func": javascript_function.from_source('function(val) { }') }
+		simple_module.imports.my_namespace.imported_func = javascript_function.from_source('function(val) { }')
 		context.load_module(simple_module)
 		print(simple_module.exports)
 
