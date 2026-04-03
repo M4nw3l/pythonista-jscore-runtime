@@ -1863,6 +1863,9 @@ class wasm_namespace:
 		
 	def __setitem__(self, key, value):
 		return self.___set___(key, value)
+
+	def __repr__(self):
+		return str(self.___imports___)
 	
 class wasm_module:
 	magic = b'\0asm'
@@ -2039,6 +2042,7 @@ class wasm_context(jscore_context):
 		return dict(self._modules)
 	
 	def module(self, name):
+		name = wasm_module.get_module_name(name)
 		return self._modules.get(name)
 		
 	def module_instance(self, name):
