@@ -152,27 +152,20 @@ module.exports.exported_function()
 module.exports.exported_function_with_parameters(convertible, python, args)
 ```
 Please bear in mind at the moment this functionality is more experimental. It is currently serving as a loading mechansim thats better than passing WebAssembly modules bytes as strings or base64 strings to JavaScriptCore. 
-
-They are exposed to JavaScriptCore through a global lookup, `_jscore_wasm_modules_data` keyed by a unique module name.
-Module names are generated as `wasm_module_[loaded_count]` currently if one is not provided. 
-There is no guarentee the same module bytes will receive the same generated name if a name is not otherwise specified.
+The following function is currently acting as the module loader on JavaScriptCore's side, it is defined in the context by `wasm_context` upon its allocation. 
 
 ```javascript
 const _jscore_wasm_modules = {}
-function _jscore_wasm_load(name){
-    const loaded_wasm_module = _jscore_wasm_modules[name];
-		if(loaded_wasm_module != null) {
-			return loaded_wasm_module;
-		}
-		const wasm_bin = _jscore_wasm_modules_data[name];
+function _jscore_wasm_load(name, wasm_bin, namespace){
+		if(namespace === null) { namespace = {}; }
 		const wasm_module = new WebAssembly.Module(wasm_bin);
-		const wasm_instance = new WebAssembly.Instance(wasm_module);
-		const wasm_module_instance = {"bytes": wasm_bin, "module": wasm_module, "instance": wasm_instance};
-		_jscore_wasm_modules[name] = wasm_module_instance;
+		const wasm_instance = new WebAssembly.Instance(wasm_module, namespace);
+		const wasm_module_instance = {"instance": wasm_instance, "namespace": namespace, "module": wasm_module};
+		_jscore_wasm_modules[name] = wasm_module_instance; // ensure module remains in scope
 		return wasm_module_instance;
 }
 ```
-The above function is currently acting as the module loader on JavaScriptCore's side, it is defined in the context by `wasm_context` upon its allocation. Then ultimately called by loading a module with `wasm_context.load_module` to create the `WebAssembly.Module` and `WebAssebly.Instance` instances in JavaScript. Libraries / imports mappings are not currently implemented.
+Calling `wasm_context.load_module` will call this function to create `WebAssembly.Module` and `WebAssebly.Instance` instances in JavaScript with a WebAssembly binary passed as an `Uint8Array` typed array instance and an imports namespace. 
 
 ## Known issues
 - Loading javascript files from remote sources / cdns etc is not implemented (yet).
