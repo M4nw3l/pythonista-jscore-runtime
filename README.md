@@ -190,9 +190,35 @@ function _jscore_wasm_load(name, wasm_bin, namespace){
 ```
 Calling `wasm_context.load_module` will call this function to create `WebAssembly.Module` and `WebAssebly.Instance` instances in JavaScript with a WebAssembly binary passed as an `Uint8Array` typed array instance and an imports namespace. 
 
+#### Example: Loading and calling Mozilla's simple.wasm
+An end to end example of loading and using a WebAssembly from Pythonista can be demonstrated by replicating [Mozilla's Loading Wasm Modules in Javascript](https://developer.mozilla.org/en-US/docs/WebAssembly/Guides/Using_the_JavaScript_API#loading_wasm_modules_in_javascript) example.
+
+- Firstly, download the [simple.wasm](https://raw.githubusercontent.com/mdn/webassembly-examples/master/js-api-examples/simple.wasm) module from the page. 
+- After downloading simple.wasm, the next step is to copy this into Pythonista. To do this, navigate to the simple.wasm file in your Files app, then select the file and open the sharing sheet, then tap "Run Pythonista Script" and then choose the "Import File" option. 
+	- **Note: This is the only safe way to import .wasm files into Pythonista. The import function from in the Pythonista app itself does not support .wasm files and must not be used to import binary!**
+- Create a folder for your project and copy simple.wasm inside.
+- In your folder with the simple.wasm module create the following script:
+
+```python
+
+from jscore_runtime import * 
+with (jscore.runtime(wasm_runtime) as runtime, runtime.context() as context):
+	# load module file
+	module = wasm_module.from_file('./simple.wasm')
+	# define imports
+	module.imports.my_namespace.imported_func = lambda v: print(v)
+	# load module into context
+	context.load_module(module)
+	# once loaded, a modules exports become available and may be invoked
+	module.exports.exported_func() # prints 42
+	
+# output: 42
+```
+Modules loading has been made to closely align with javascript with a couple of notable differences, firstly Python functions/callables may be used as imports as well as javascript functions. A fixed imports table is defined per `wasm_module` and `wasm_context`, imports must therefore be specified via the `wasm_module.imports` module specific imports or `wasm_context.imports` context-wide imports properties. A modules imports always override context-wide imports. 
+
 ## Known issues
 - Loading javascript files from remote sources / cdns etc is not implemented (yet).
 - Modules and scripts loading may not work correctly for some javascript libraries and they may need manual adjustments to work currently.
 - ModulesLoaderDelegate is using a private protcol / api as there is no other way to access the functionality otherwise.
 - JSScript source code strings are C++ objects which are more awkward structures to read with ctypes. A work around of separately loading a copy of the script source is used at the moment, so any module preprocessing performed when loading a JSScript is lost currently.
-- WebAssembly module imports mapping mechanisms are missing / manual.
+
