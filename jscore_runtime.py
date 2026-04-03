@@ -411,6 +411,7 @@ class jscore:
 	JSObjectMakeDate = objc.c_func(lib.JSObjectMakeDate, c_void_p, c_void_p, c_size_t, c_void_p, c_void_p)
 	JSObjectMakeError = objc.c_func(lib.JSObjectMakeError, c_void_p, c_void_p, c_size_t, c_void_p, c_void_p)
 	JSObjectMakeFunction = objc.c_func(lib.JSObjectMakeFunction, c_void_p, c_void_p, c_void_p, c_uint, c_void_p, c_void_p, c_void_p, c_int, c_void_p)
+	JSObjectCallAsFunctionCallback = CFUNCTYPE(c_void_p, c_void_p, c_void_p, c_void_p, c_ulong, c_void_p, c_void_p)
 	JSObjectMakeFunctionWithCallback = objc.c_func(lib.JSObjectMakeFunctionWithCallback, c_void_p, c_void_p, c_void_p, c_void_p)
 	JSObjectMakeRegExp = objc.c_func(lib.JSObjectMakeRegExp, c_void_p, c_void_p, c_size_t, c_void_p, c_void_p)
 	JSObjectSetPrivate = objc.c_func(lib.JSObjectSetPrivate, c_bool, c_void_p, c_void_p)
@@ -567,6 +568,28 @@ class jscore:
 		rt = jscore._runtimes.get(key)
 		if runtime is rt: # remove destroyed runtime if its a tracked singleton instance
 			del jscore._runtimes[key]
+	
+	_context_ref_context_lookup = {}
+	@classmethod
+	def context_allocate(cls, vm):
+		context = jscore.JSContext.alloc().initWithVirtualMachine_(vm)
+		retain_global(context)
+		context.setInspectable(True)
+		context_ref = context.JSGlobalContextRef()
+		cls._context_ref_context_lookup[context_ref.value] = context
+		return context
+	
+	@classmethod
+	def context_deallocate(cls, context):
+		context_ref = context.JSGlobalContextRef()
+		del cls._context_ref_context_lookup[context_ref.value]
+		release_global(context)
+		
+	@classmethod
+	def context_ref_to_context(cls, context_ref):
+		if context_ref is None:
+			return None
+		return cls._context_ref_context_lookup[context_ref.value]
 	
 	@classmethod
 	def context_eval(cls, context, script, sourceUrl = None):
@@ -737,7 +760,7 @@ class jscore:
 		raise NotImplementedError("Unknown value_ref type")
 
 	@classmethod
-	def _py_to_jsvalueref(cls, context_ref, value):
+	def _py_to_jsvalueref(cls, context_ref, value, parent_ref = None):
 		if value is None:
 			return cls.JSValueMakeNull(context_ref)
 		if javascript_value.is_undefined(value):
@@ -759,23 +782,44 @@ class jscore:
 		if isinstance(value, str):
 			str_ref = jscore.str_to_jsstringref(value)
 			return cls.JSValueMakeString(context_ref, str_ref)
-		if isinstance(value, bytes) or isinstance(value, list):
+		if isinstance(value, javascript_function):
+			source = str(value)
+			value_ref = javascript_function.from_source(source, context_ref).compile()
+			return value_ref
+		if isinstance(value, javascript_callback):
+			value_ref = value.get_jsvalue_ref(context_ref, parent_ref)
+			return value_ref
+		if isinstance(value, bytes):
 			count = len(value)
-			items = objc.c_array_p(count, lambda i: cls.py_to_jsvalueref(context_ref, value[i]))
 			ex_ref = c_void_p(None)
-			return cls.JSObjectMakeArray(context_ref, count, items, byref(ex_ref))
+			value_ref = cls.JSObjectMakeTypedArray(context_ref, cls.kJSTypedArrayTypeUint8Array, count, byref(ex_ref))
+			bytes_ptr = jscore.JSObjectGetTypedArrayBytesPtr(context_ref, value_ref, byref(ex_ref))
+			if bytes_ptr is not None:
+				memmove(bytes_ptr, value, count)
+			return value_ref
+		if objc.ns_subclass_of(value, NSData):
+			count = value.length()
+			ex_ref = c_void_p(None)
+			value_ref = cls.JSObjectMakeTypedArray(context_ref, cls.kJSTypedArrayTypeUint8Array, count, byref(ex_ref))
+			bytes_ptr = jscore.JSObjectGetTypedArrayBytesPtr(context_ref, value_ref, byref(ex_ref))
+			if bytes_ptr is not None:
+				value.getBytes_length_(bytes_ptr, count)
+			return value_ref
+		if isinstance(value, list):
+			ex_ref = c_void_p(None)
+			value_ref = cls.JSObjectMakeArray(context_ref, 0, None, byref(ex_ref))
+			count = len(value)
+			for i in range(count):
+				val_ref = cls.py_to_jsvalueref(context_ref, value[i], value_ref)
+				cls.JSObjectSetPropertyAtIndex(context_ref, value_ref, i, val_ref, byref(ex_ref))
+			return value_ref
 		if isinstance(value, dict):
-			json_value = cls.py_to_js(value)
 			value_ref = cls.JSObjectMake(context_ref, None, None)
 			ex_ref = c_void_p(None)
 			for k,v in value.items():
 				key_ref = cls.str_to_jsstringref(k)
-				val_ref = cls.py_to_jsvalueref(context_ref, v)
+				val_ref = cls.py_to_jsvalueref(context_ref, v, value_ref)
 				cls.JSObjectSetProperty(context_ref, value_ref, key_ref, val_ref, 0, byref(ex_ref))
-			return value_ref
-		if isinstance(value, javascript_function):
-			source = str(value)
-			value_ref = javascript_function.from_source(source, context_ref).compile()
 			return value_ref
 		typ = type(value)
 		raise NotImplementedError(f"Type '{typ}' for value '{value}' not supported.")
@@ -787,7 +831,7 @@ class jscore:
 		return cast(value_ref, c_void_p) # ensure a c_void_p
 	
 	@classmethod
-	def py_to_jsvalue(cls, context, value):
+	def py_to_jsvalue(cls, context, value, parent = None):
 		if value is None:
 			return cls.JSValue.valueWithNullInContext_(context)
 		if javascript_value.is_undefined(value):
@@ -812,22 +856,37 @@ class jscore:
 			# further escaping and resolving may be required here...
 			jsvalue, ex  = cls.context_eval(context, f'(function() {{ return ({source}); }})()') 
 			return jsvalue
+		if isinstance(value, javascript_callback):
+			jsvalue = value.get_jsvalue(context, parent)
+			return jsvalue
+		if isinstance(value, bytes):
+			count = len(value)
+			jsvalue = cls.context_eval(context, f"new Uint8Array({count});")
+			context_ref, value_ref = cls.jsvalue_get_refs(jsvalue)
+			ex_ref = c_void_p(None)
+			bytes_ptr = jscore.JSObjectGetTypedArrayBytesPtr(context_ref, value_ref, byref(ex_ref))
+			if bytes_ptr is not None:
+				memmove(bytes_ptr, value, count)
+			return jsvalue
+		if objc.ns_subclass_of(value, NSData):
+			count = value.length()
+			jsvalue = cls.context_eval(context, f"new Uint8Array({count});")
+			context_ref, value_ref = cls.jsvalue_get_refs(jsvalue)
+			ex_ref = c_void_p(None)
+			bytes_ptr = jscore.JSObjectGetTypedArrayBytesPtr(context_ref, value_ref, byref(ex_ref))
+			if bytes_ptr is not None:
+				value.getBytes_length_(bytes_ptr, count)
+			return jsvalue
 		if isinstance(value, dict):
 			jsvalue = cls.JSValue.valueWithNewObjectInContext_(context)
 			for k,v in value.items():
-				val = cls.py_to_jsvalue(context, v)
+				val = cls.py_to_jsvalue(context, v, jsvalue)
 				jsvalue.setValue_forProperty_(val, k)
-			return jsvalue
-		if isinstance(value, bytes):
-			jsvalue = cls.JSValue.valueWithNewArrayInContext_(context) # should probably be typed array for a buffer copy
-			for i in range(len(value)):
-				val = cls.py_to_jsvalue(context, int(value[i]))
-				jsvalue.setValue_atIndex_(i, val)
 			return jsvalue
 		if isinstance(value, list):
 			jsvalue = cls.JSValue.valueWithNewArrayInContext_(context)
 			for i in range(len(value)):
-				val = cls.py_to_jsvalue(context, value[i])
+				val = cls.py_to_jsvalue(context, value[i], jsvalue)
 				jsvalue.setValue_atIndex_(i, val)
 			return jsvalue
 		typ = type(value)
@@ -1003,6 +1062,76 @@ class javascript_function:
 				context_ref = context.JSGlobalContextRef()
 		return cls(source=source, context_ref=context_ref)
 
+
+class javascript_callback:
+	def __init__(self, callback, name = None):
+		self.callback = callback
+		self.name = name
+		self.callback_ref = None
+		self.context_ref = None
+		self.value_ref = None
+		self._jsvalue = None
+		
+	def compile(self, context_ref = None, parent_ref = None):
+		if context_ref is None:
+			context_ref = self.context_ref
+		if context_ref is None:
+			raise Exception("Context is required to compile callbacks")
+		if self.value_ref is not None:
+			raise Exception("Cannot recompile callbacks")
+		if self.name is None:
+			self.name = javascript_callback.unique_name()
+		name_ref = jscore.str_to_jsstringref(self.name)
+		self.callback_ref = jscore.JSObjectCallAsFunctionCallback(self._invoke_callback)
+		value_ref = jscore.JSObjectMakeFunctionWithCallback(context_ref, name_ref, self.callback_ref)
+		jscore.JSValueProtect(context_ref, value_ref)
+		self.context_ref = context_ref
+		self.value_ref = value_ref
+		if parent_ref is None:
+			parent_ref = jscore.JSContextGetGlobalObject(self.context_ref)
+		ex = c_void_p(None)
+		jscore.JSObjectSetProperty(self.context_ref, parent_ref, name_ref, value_ref, 0, byref(ex))
+	
+	def get_jsvalue_ref(self, context_ref, parent_ref = None):
+		if self.context_ref is not None and self.context_ref != context_ref:
+			raise Exception("Cannot change context")
+		if self.value_ref is None:
+			self.compile(context_ref, parent_ref)
+		return self.value_ref
+	
+	def get_jsvalue(self, context, parent = None):
+		context_ref = context.JSGlobalContextRef()
+		parent_ref = None
+		if parent is not None:
+			parent_ref = parent.JSValueRef()
+		if self._jsvalue is None:
+			value_ref = self.get_jsvalue_ref(context_ref, parent_ref)
+			if parent is None:
+				parent = context.globalObject()
+			self._jsvalue = parent.valueForProperty(self.name) # work around to obtain a jsvalue from jsvalue_ref
+		return self._jsvalue
+
+	def _invoke_callback(self, ctx, funcObj, thisObj, args_count, args, ex):
+		ctx = c_void_p(ctx)
+		funcObj = c_void_p(funcObj)
+		thisObj = c_void_p(thisObj)
+		callback_args = []
+		for i in range(args_count):
+			arg = c_void_p.from_address(args + (i * sizeof(c_void_p)))
+			arg_value = jscore.jsvalueref_to_py(ctx, arg)
+			callback_args.append(arg_value)
+		returnValue = self.callback(*callback_args)
+		returnJSValue_ref = jscore.py_to_jsvalueref(ctx, returnValue)
+		return returnJSValue_ref.value
+	
+	_name_count = 0
+	@classmethod
+	def unique_name(cls):
+		name = f"python_callback_{cls._name_count}"
+		cls._name_count = cls._name_count + 1
+		return name
+
+
 class javascript_object(dict):
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
@@ -1061,7 +1190,7 @@ class javascript_value:
 	def __repr__(self):
 		return str(self.value)
 
-# base runtime framework
+
 class jsscript_ref:
 	def __init__(self, runtime, url, source):
 		self.runtime = runtime
@@ -1101,6 +1230,7 @@ class jsscript_ref:
 		value = jscore.jsvalueref_to_py(context_ref, value_ref)
 		exception = jscore.jsvalueref_to_py(context_ref, exception_ref)
 		return value, exception
+
 
 class jscore_module_loader:
 	def __init__(self, context):
@@ -1211,6 +1341,7 @@ class jscore_module_loader:
 		return script
 
 
+# base runtime framework
 class jscore_context:
 	def __init__(self, runtime):
 		self.runtime = runtime
@@ -1220,9 +1351,7 @@ class jscore_context:
 	def allocate(self):
 		if self.context is not None:
 			raise Exception("Context already allocated. Do not call allocate/deallocate manually.")
-		self.context = jscore.JSContext.alloc().initWithVirtualMachine_(self.runtime.vm)
-		retain_global(self.context)
-		self.context.setInspectable(True)
+		self.context = jscore.context_allocate(self.runtime.vm)
 		self.loader = jscore_module_loader(self)
 		
 	def deallocate(self):
@@ -1230,7 +1359,7 @@ class jscore_context:
 			raise Exception("Context already deallocated. Do not call allocate/deallocate manually.")
 		self.loader.release()
 		self.loader = None
-		release_global(self.context)
+		jscore.context_deallocate(self.context)
 		self.context = None
 
 	def alloc(self):
@@ -1709,6 +1838,8 @@ class wasm_namespace:
 		return value
 		
 	def ___set___(self, key, value):
+		if not isinstance(value, javascript_function) and callable(value):
+			value = javascript_callback(value, key)
 		self.___imports___[key] = value
 
 	def __getattr__(self, key):
@@ -2203,9 +2334,10 @@ if __name__ == '__main__':
 	if simple_module_path.exists():
 		header("simple.wasm")
 		simple_module = wasm_module.from_file("./simple.wasm")
-		simple_module.imports.my_namespace.imported_func = javascript_function.from_source('function(val) { }')
+		simple_module.imports.my_namespace.imported_func = lambda v: print(v)
 		context.load_module(simple_module)
 		print(simple_module.exports)
+		simple_module.exports.exported_func()
 
 	context.destroy()
 	runtime.destroy()
