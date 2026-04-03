@@ -126,19 +126,43 @@ WebAssembly modules can be loaded from files or as raw bytes with the `wasm_modu
 
 ```python
 module_file = wasm_module.from_file("./path/to/module.wasm")
-module_bytes = wasm_module(b'\0asm\1\0\0\0'+b'[module_body]', 'optional_module_name_or_path')
+module_bytes = wasm_module(b'\0asm\1\0\0\0'+b'[module_body_bytes]', 'optional_module_name_or_path')
 module_data = wasm_module([0, 97, 115, 109, 1, 0, 0, 0, ...], 'optional_module_name_or_path')
 
 module_instance = module_file
-context.load(module_instance)
+context.load_module(module_instance)
 
 # once a module has been loaded its instance and exports are available from properties
 print(module_instance.instance)
 print(module_instance.exports)
 
 ```
-Previously loaded module instances may also be retrieved from the context:
+Imports may be specified before loading a `wasm_module` instance obtained from a files or bytes into the context.
+Python functions may be specified as imports directly, they will be converted automatically into a `javascript_callback` instance.
+
 ```python
+module = wasm_module.from_file("./path/to/module.wasm")
+# define python functions for imports
+def imported_func(arg):
+	pass
+module.imports.my_namespace.imported_func = imported_func
+
+# any callable may be specified as an import, the only requirement is parameters counts match.
+module.imports.my_namespace.imported_func = lambda v: print(v)
+
+# a javascript_function may also be specified as an import
+module.imports.my_namespace.imported_func = javascript_function.from_source("function (arg) { }")
+
+# an ImportError is raised if load_module is called for modules expecting imports without functions 
+# for all of the expected imports specified.
+context.load_module(module)
+
+```
+
+Previously loaded module instances may be retrieved from the context:
+```python
+loaded_modules = context.modules # all modules
+
 loaded_module = context.module("module_name_or_path")
 ```
 
@@ -151,8 +175,7 @@ context.load(module)
 module.exports.exported_function()
 module.exports.exported_function_with_parameters(convertible, python, args)
 ```
-Please bear in mind at the moment this functionality is more experimental. It is currently serving as a loading mechansim thats better than passing WebAssembly modules bytes as strings or base64 strings to JavaScriptCore. 
-The following function is currently acting as the module loader on JavaScriptCore's side, it is defined in the context by `wasm_context` upon its allocation. 
+The following  function is currently acting as the module loader on JavaScriptCore's side, it is defined in the context by `wasm_context` upon its allocation. 
 
 ```javascript
 const _jscore_wasm_modules = {}
