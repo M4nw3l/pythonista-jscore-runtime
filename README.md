@@ -88,11 +88,35 @@ context.js.double = 1.1
 context.js.array = []
 context.js.object = {}
 ```
-Creating a function however is slightly different as it uses javascript source
+
+Python functions can be specified as functions callable from javascript:
+
+```python
+
+def python_print(text):
+	print(text)
+	
+context.js.python_print = python_print
+
+# call from javascript
+context.eval('python_print("hello from javascript");')
+# call from python as javascript_function calling back to python
+context.js.python_print("hello via javascript")
+
+# any callable may be specified
+context.js.python_fn = lambda text: print(text)
+
+# values can be returned to javascript
+context.js.python_val = lambda: {"str": "Hello from python", "num":10, "list":[1,2,3]}
+# and back to python
+context.eval('python_print(python_val());')
+```
+
+A function may also be created with javascript source:
 ```python
 context.js.my_function = javascript_function.from_source('function() { return 1234; }')
 ```
-Defined functions may be called from Python:
+Defined javascript functions may also be called directly from Python:
 ```python
 context.js.my_function() # returns 1234
 ```
