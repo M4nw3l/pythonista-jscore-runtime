@@ -825,8 +825,8 @@ class jscore:
 		raise NotImplementedError(f"Type '{typ}' for value '{value}' not supported.")
 		
 	@classmethod
-	def py_to_jsvalueref(cls, context_ref, value):
-		value_ref = cls._py_to_jsvalueref(context_ref, value)
+	def py_to_jsvalueref(cls, context_ref, value, parent_ref = None):
+		value_ref = cls._py_to_jsvalueref(context_ref, value, parent_ref)
 		#cls.JSValueProtect(context_ref, value_ref)
 		return cast(value_ref, c_void_p) # ensure a c_void_p
 	
@@ -1130,7 +1130,24 @@ class javascript_callback:
 		name = f"python_callback_{cls._name_count}"
 		cls._name_count = cls._name_count + 1
 		return name
-
+		
+	@classmethod
+	def is_callable(cls, func):
+		return not isinstance(func, javascript_function) and callable(func)
+		
+	@classmethod
+	def wrap(cls, context, value, name = None):
+		if javascript_callback.is_callable(value):
+			return context.callback(value, name)
+		if isinstance(value, dict):
+			for k, v in value.items():
+				value[k] = cls.wrap(context, v, k)
+		elif isinstance(value, list):
+			for i in range(len(value)):
+				k = str(i)
+				v = value[i]
+				value[i] = cls.wrap(context, v, k)
+		return value
 
 class javascript_object(dict):
 	def __init__(self, *args, **kwargs):
@@ -1347,12 +1364,14 @@ class jscore_context:
 		self.runtime = runtime
 		self.context = None
 		self.depth = 0
+		self.callbacks = None
 
 	def allocate(self):
 		if self.context is not None:
 			raise Exception("Context already allocated. Do not call allocate/deallocate manually.")
 		self.context = jscore.context_allocate(self.runtime.vm)
 		self.loader = jscore_module_loader(self)
+		self.callbacks = {}
 		
 	def deallocate(self):
 		if self.context is None:
@@ -1361,6 +1380,7 @@ class jscore_context:
 		self.loader = None
 		jscore.context_deallocate(self.context)
 		self.context = None
+		self.callbacks = None
 
 	def alloc(self):
 		if self.context is not None:
@@ -1440,6 +1460,16 @@ class jscore_context:
 	def context_ref(self):
 		self.alloc()
 		return self.context.JSGlobalContextRef()
+		
+	def callback(self, func, name = None):
+		if not javascript_callback.is_callable(func):
+			raise Exception(f"'{func}' is not a python callable/function")
+		key = func
+		callback = self.callbacks.get(key, None)
+		if callback is None:
+			callback = javascript_callback(func, name)
+			self.callbacks[key] = callback
+		return callback
 	
 
 class jscore_runtime:
@@ -1571,12 +1601,10 @@ class jscore_runtime:
 		return self.new_context()
 
 # helper class to determine the minimum set of changes to build a jsvalue in terms of javascript statements
-class jsvalue_accessor:
-	def __init__(self, context, key, current = javascript_value.undefined, define = True):
+class jsvalue_evaluator:
+	def __init__(self, context, parent = None):
 		self.context = context
-		self.key = key
-		self.current = jsobject_accessor.unwrap(current)
-		self.define = define
+		self.parent = parent
 	
 	def object_equal(self, x, y):
 		if isinstance(x, dict):
@@ -1608,14 +1636,16 @@ class jsvalue_accessor:
 			return self.object_equal(x, y)
 		return self.value_equal(x, y)
 	
-	def build(self, key, value, current, equal = None):
+	def eval_set(self, context, parent, key, value, current, equal = None):
 		if isinstance(value, list):
 			if (equal is None and self.object_equal(value, current)) or equal:
-				return None
+				return
 			if javascript_value.is_null_or_undefined(current) or len(current) == 0:
-				value = jscore.py_to_js(value)
-				return f'{key} = {value};'
-			statements = []
+				value = javascript_callback.wrap(self.context, value, key)
+				jsvalue = jscore.py_to_jsvalue(context, value, parent)
+				parent.setValue_forProperty_(jsvalue, key)
+				return jsvalue
+			jsvalue = parent.valueForProperty_(key)
 			for i in range(len(value)):
 				k = str(i)
 				v = value[i]
@@ -1625,20 +1655,16 @@ class jsvalue_accessor:
 				except:
 					pass
 				if not self.item_equal(v, c):
-					k = "".join([key, '[', k, ']'])
-					s = self.build(k, v, c, False)
-					if s is not None:
-						statements.append(s)
-			if len(statements) > 0:
-				return "\n".join(statements)
-			return statement
+					self.eval_set(context, jsvalue, k, v, c, False)
+			return jsvalue
 		elif isinstance(value, dict):
 			if (equal is None and self.object_equal(value, current)) or equal:
-				return None
+				return
 			if javascript_value.is_null_or_undefined(current) or len(current) == 0:
-				value = jscore.py_to_js(value)
-				return f'{key} = {value};'
-			statements = []
+				value = javascript_callback.wrap(self.context, value, key)
+				jsvalue = jscore.py_to_jsvalue(context, value, parent)
+				return jsvalue
+			jsvalue = parent.valueForProperty_(key)
 			for k,v in value.items():
 				c = javascript_value.undefined
 				try:
@@ -1646,46 +1672,59 @@ class jsvalue_accessor:
 				except:
 					pass
 				if not self.item_equal(v, c):
-					k = "".join([key, '.', k])
-					s = self.build(k, v, c, False)
-					if s is not None:
-						statements.append(s)
-			if len(statements) > 0:
-				return "\n".join(statements)
-			return statement
+					self.eval_set(context, jsvalue, k, v, c, False)
+			return jsvalue
 		else:
 			if (equal is None and self.value_equal(value, current)) or equal:
-				return None
-			value = jscore.py_to_js(value)
-			return f'{key} = {value};'
+				return
+			value = javascript_callback.wrap(self.context, value, key)
+			jsvalue = jscore.py_to_jsvalue(context, value, parent)
+			parent.setValue_forProperty_(jsvalue, key)
+			return jsvalue
 
-	def set(self, value):
+	def set(self, key, value, current):
 		value = jsobject_accessor.unwrap(value)
-		current = self.current
-		key = self.key
-		define = self.define
-		statement = None
-		if define and javascript_value.is_undefined(current):
-			key = f'let {key}'
-			value = jscore.py_to_js(value)
-			statement = f'{key} = {value};'
-		else:
-			statement = self.build(key, value, current)
-		if statement is None:
-			return
-		#print(statement)
-		result = self.context.eval(statement)
-		exception = result.exception
-		if exception is not None:
-			raise ValueError(exception)
+		current = jsobject_accessor.unwrap(current)
+		jsvalue = self.parent
+		context = self.context.context
+		if jsvalue is None:
+			jsvalue = context.globalObject()
+		val = self.eval_set(context, jsvalue, key, value, current)
+		if val is not None:
+			jsvalue.setValue_forProperty_(val, key)
+		
+	def set_self(self, value, current):
+		value = jsobject_accessor.unwrap(value)
+		current = jsobject_accessor.unwrap(current)
+		jsvalue = self.parent
+		context = self.context.context
+		if isinstance(value, list):
+			for i in range(len(value)):
+				k = str(i)
+				v = value[i]
+				c = javascript_value.undefined
+				try:
+					c = current[i]
+				except:
+					pass
+				self.eval_set(context, jsvalue, k, v, c)
+		elif isinstance(value, dict):
+			for k,v in value.items():
+				c = javascript_value.undefined
+				try:
+					c = current[k]
+				except:
+					pass
+				self.eval_set(context, jsvalue, k, v, c)
 
 
 # metaclass to map jsobjects to appear analogous to regular python objects
 class jsobject_accessor:
-	def __init__(self, context, jsobject, key):
+	def __init__(self, context, jsobject, path):
 		self.___context___ = context
 		self.___jsobject___ = jsobject
-		self.___key___ = key
+		self.___evaluator___ = jsvalue_evaluator(context, jsobject)
+		self.___path___ = path
 		self.___init___ = True
 		
 	def ___get___(self, key):
@@ -1694,23 +1733,23 @@ class jsobject_accessor:
 			return javascript_value.undefined
 		value = self.___jsobject___.valueForProperty(key)
 		if jscore.jsvalue_is_object(value):
+			path = key
 			if self.___jsobject___.isArray():
-				key = "".join([self.___key___,'[', key,']'])
+				path = "".join([self.___path___,'[', path,']'])
 			else:
-				key = ".".join([self.___key___, key])
-			return jsobject_accessor(self.___context___, value, key)
+				path = ".".join([self.___path___, path])
+			return jsobject_accessor(self.___context___, value, path)
 		return jscore.jsvalue_to_py(value)
 		
 	def ___set___(self, key, value):
 		current = self.___get___(key)
-		context = self.___context___
+		path = key
 		if self.___jsobject___.isArray():
-			key = "".join([self.___key___,'[', key,']'])
+			path = "".join([self.___path___,'[', path,']'])
 		else:
-			key = ".".join([self.___key___, key])
-		accessor = jsvalue_accessor(context, key, current, define=False)
-		accessor.set(value)
-			
+			path = ".".join([self.___path___, path])
+		self.___evaluator___.set(key, value, current)
+
 	def __len__(self):
 		return len(jscore.jsobject_get_keys(self.___jsobject___))
 
@@ -1751,6 +1790,7 @@ class javascript_context_accessor:
 	def __init__(self, context):
 		self.___context___ = context
 		self.___globalObject___ = context.context.globalObject()
+		self.___evaluator___ = jsvalue_evaluator(context, self.___globalObject___)
 		self.___init___ = True
 		
 	def ___get___(self, key):
@@ -1767,10 +1807,22 @@ class javascript_context_accessor:
 		return jscore.jsvalue_to_py(value)
 		
 	def ___set___(self, key, value):
-		current = self.___get___(key)
-		context = self.___context___
-		accessor = jsvalue_accessor(context, key, current, define=True)
-		accessor.set(value)
+		jsvalue = None
+		if not self.___globalObject___.hasProperty_(key):
+			result = self.___context___.eval(f'{key};')
+			jsvalue = result.jsvalue
+			if jscore.jsvalue_is_object(jsvalue) and (isinstance(value, list) or isinstance(value, dict)):
+				evaluator = jsvalue_evaluator(self.___context___, jsvalue)
+				current = jscore.jsvalue_to_py(jsvalue)
+				evaluator.set_self(value, current)
+				return
+		else:
+			jsvalue = self.___globalObject___.valueForProperty(key)
+		current = javascript_value.undefined
+		if jsvalue is not None:
+			current = jscore.jsvalue_to_py(jsvalue)
+		self.___evaluator___.set(key, value, current)
+		
 
 	def __getattr__(self, key):
 		return self.___get___(key)
@@ -1838,8 +1890,6 @@ class wasm_namespace:
 		return value
 		
 	def ___set___(self, key, value):
-		if not isinstance(value, javascript_function) and callable(value):
-			value = javascript_callback(value, key)
 		self.___imports___[key] = value
 
 	def __getattr__(self, key):
@@ -2073,6 +2123,7 @@ class wasm_context(jscore_context):
 			namespace[k] = v
 		if len(namespace) == 0:
 			return None
+		namespace = javascript_callback.wrap(self, namespace)
 		jsnamespace = jscore.py_to_jsvalue(self.context, namespace)
 		return jsnamespace
 		
@@ -2308,7 +2359,21 @@ if __name__ == '__main__':
 	context.eval("function fndeftest() { return 123; }")
 	print('"fndeftest" in context.js = ', "fndeftest" in context.js)
 	print("Result:", context.js.fndeftest, context.js.fndeftest())
+	
+	header("Define python functions callable from js")
+	context.js.pythonfn = lambda text: print(text)
+	print("context.js.pythonfn = lambda text: print(text)")
+	print(context.js.pythonfn)
+	print("context.eval('pythonfn(\"Hello python\");')")
+	context.eval('pythonfn("Hello python");')
+	print()
+	context.js.python_val = lambda: {"str": "Hello from python", "num":10, "list":[1,2,3]}
+	print('context.js.python_val = lambda: {"str": "Hello from python", "num":10, "list":[1,2,3]}')
+	print(context.js.python_val)
+	print("context.eval('python_val();')")
+	print(context.eval('python_val();'))
 
+	header("Modules/scripts")
 	context.eval_module_source("function module_source() { return 10; }", "sourcetest.js")
 	print(context.js.module_source)
 	#context.eval_module_file("./test.js")
