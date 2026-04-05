@@ -26,15 +26,13 @@ with (jscore.runtime() as runtime, runtime.context() as context):
 
 ## Installation
 
-Download [jscore_runtime.py](jscore_runtime.py) from the repository and copy to your site-packages folder.
-
-<!--
-Install with pip via StaSh 
+Install with pip using [StaSh](https://github.com/ywangd/stash).
 
 ```bash
 pip install pythonista-jscore-runtime 
 ```
--->
+
+Or download [jscore_runtime.py](jscore_runtime.py) from the repository and copy to your site-packages folder.
 
 ## Usage
 ### Javascript Runtime
@@ -125,7 +123,7 @@ context.js.my_function() # returns 1234
 The `wasm_runtime` class, and its associated `wasm_context` and `wasm_module` classes allow WebAssembly modules to be loaded 
 with files and byte arrays from Python. They efficiently load WebAssembly modules via a direct buffer copy of an NSData objects bytes into a Uint8Arrays backing store in JavaScriptCore. Allowing a module and its instance to then instantiated, and its exports are bridged directly to Python. Interop with JavaScriptCore allows WebAssembly functions to be mapped and called as any other normal Python callable function. WebAssembly methods are exposed from JavaScriptCore as `function() { [Native Code] }` bodied functions. The performance should be close to excuting code natively but is still being interpreted by JavaScriptCore. It is also likely that JavaScriptCore's WebAssembly runtime may be subject to some restrictions imposed by Apple's general security policies. 
 
-To create a `wasm_context` to instantiate `wasm_module` instances from a `wasm_runtime` instance needs to be created first. This currently works the same way as the `javascript_runtime`. 
+To create a `wasm_context` a `wasm_runtime` instance needs to be created first. This currently works the same way as the `javascript_runtime`. 
 
 A singleton runtime instance, with a lifetime of the program, may be obtained from the `jscore.runtime` accessor.
 ```python
@@ -144,7 +142,7 @@ A `wasm_context` may be obtained from runtime instance:
 context = runtime.context()
 ```
 
-Although a `wasm_context` may execute JavaScript and vice versa, `wasm_runtime` and `wasm_context` are designed to integrate Python with WebAssembly as a first class runtime, without need for any JavaScript by default, to load and call WebAssembly modules from Python.
+Although a `wasm_context` may execute JavaScript and vice versa, `wasm_runtime` and `wasm_context` are designed to integrate Python with WebAssembly as a first class runtime, without need for any JavaScript by default, to load and call WebAssembly modules from Python. A `wasm_context` therefore focuses on loading `wasm_module` instances.
 
 WebAssembly modules can be loaded from files or as raw bytes with the `wasm_module` class and `wasm_context.load_module` function.
 
