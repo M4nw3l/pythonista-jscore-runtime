@@ -549,7 +549,9 @@ class jscore:
 	])
 	
 	_runtime_vm = None
+	_runtime_context = None
 	_runtimes = {}
+	_runtimes_contexts = {}
 	_runtime_cleanups = []
 	@classmethod
 	def new_runtime(cls, runtime_class, *args, **kwargs):
@@ -562,14 +564,58 @@ class jscore:
 	def runtime(cls, runtime_class = None):
 		if runtime_class is None:
 			runtime_class = javascript_runtime
-		runtime = jscore._runtimes.get(runtime_class)
+		runtime = cls._runtimes.get(runtime_class)
 		if runtime is None:
 			if cls._runtime_vm is None:
 				cls._runtime_vm = cls.vm_allocate()
-			runtime = cls.new_runtime(runtime_class, cls._runtime_vm)
-			jscore._runtimes[runtime_class] = runtime
+				cls._runtime_context = cls.context_allocate(cls._runtime_vm)
+			runtime = cls.new_runtime(runtime_class, cls._runtime_vm, cls._runtime_context)
+			cls._runtimes[runtime_class] = runtime
 		return runtime
-		
+
+	@classmethod
+	def _runtimes_cleanup(cls):
+		cls.context_deallocate(cls._runtime_context)
+		cls.vm_deallocate(cls._runtime_vm) # if we destroyed the last singleton runtime reference cleanup shared context and vm  
+		for cleanup in cls._runtime_cleanups:
+			cleanup()
+		# reset everything
+		cls._runtimes = {}
+		cls._runtime_cleanups = []
+		cls._runtimes_contexts = {}
+		cls._runtime_vm = None
+		cls._runtime_context = None
+
+	@classmethod
+	def context(cls, runtime_class = None):
+		if runtime_class is None:
+			runtime_class = javascript_runtime
+		context = cls._runtimes_contexts.get(runtime_class)
+		if context is None:
+			runtime = cls.runtime(runtime_class)
+			context = runtime.context()
+			cls._runtimes_contexts[runtime_class] = context
+		return context
+
+	@classmethod
+	def javascript(cls):
+		return cls.context(javascript_runtime)
+	#aliases
+	js = javascript
+
+	@classmethod
+	def webassembly(cls):
+		return cls.context(wasm_runtime)
+	#aliases
+	wasm = webassembly
+
+	@classmethod
+	def destroy(cls):
+		for typ,context in dict(cls._runtimes_contexts).items():
+			context.destroy()
+		for typ,runtime in dict(cls._runtimes).items():
+			runtime.destroy()
+
 	@classmethod
 	def vm_allocate(cls):
 		vm = jscore.JSVirtualMachine.alloc().init()
@@ -605,11 +651,7 @@ class jscore:
 		if runtime is rt: # remove destroyed runtime if its a tracked singleton instance
 			del cls._runtimes[key]
 			if len(cls._runtimes) == 0:
-				cls.vm_deallocate(cls._runtime_vm) # if we destroyed the last singleton runtime reference cleanup vm
-				cls._runtime_vm = None
-				for cleanup in cls._runtime_cleanups:
-					cleanup()
-				cls._runtime_cleanups = []
+				cls._runtimes_cleanup()
 	
 	_context_ref_context_lookup = {}
 	@classmethod
@@ -1402,35 +1444,44 @@ class jscore_module_loader:
 
 # base runtime framework
 class jscore_context:
-	def __init__(self, runtime):
+	def __init__(self, runtime, context = None):
 		self.runtime = runtime
-		self.context = None
+		self.context = context
+		self.context_owner = self.context is None
+		self.allocated = False
 		self.depth = 0
+		self.accessor = None
 		self.callbacks = None
 
 	def allocate(self):
-		if self.context is not None:
-			raise Exception("Context already allocated. Do not call allocate/deallocate manually.")
-		self.context = jscore.context_allocate(self.runtime.vm)
+		if self.context_owner:
+			if self.context is not None:
+				raise Exception("Context already allocated. Do not call allocate/deallocate manually.")
+			self.context = jscore.context_allocate(self.runtime.vm)
 		self.loader = jscore_module_loader(self)
+		self.accessor = javascript_context_accessor(self)
 		self.callbacks = {}
+		self.allocated = True
 		
 	def deallocate(self):
 		if self.context is None:
 			raise Exception("Context already deallocated. Do not call allocate/deallocate manually.")
 		self.loader.release()
 		self.loader = None
-		jscore.context_deallocate(self.context)
-		self.context = None
+		self.accessor = None
+		if self.context_owner:
+			jscore.context_deallocate(self.context)
+			self.context = None
 		self.callbacks = None
+		self.allocated = False
 
 	def alloc(self):
-		if self.context is not None:
+		if self.allocated:
 			return
 		self.allocate()
 
 	def destroy(self):
-		if self.context is None:
+		if not self.allocated:
 			return
 		self.deallocate()
 
@@ -1512,12 +1563,20 @@ class jscore_context:
 			callback = javascript_callback(func, name)
 			self.callbacks[key] = callback
 		return callback
+		
+	@property
+	def js(self):
+		self.alloc()
+		return self.accessor
 	
 
 class jscore_runtime:
-	def __init__(self, vm = None):
+	def __init__(self, vm = None, shared_context = None):
 		self.vm = vm
 		self.vm_owner = self.vm is None
+		if self.vm_owner and shared_context is not None:
+			raise Exception("A matching vm must be specified with a shared context. Contexts must not be shared from another virtual machine.")
+		self.shared_context = shared_context # never owner when shared_context is not None
 		self.depth = 0
 		self.module_paths = {}
 		self.scripts = []
@@ -1627,12 +1686,14 @@ class jscore_runtime:
 			self.destroy()
 		return self
 
-	def new_context(self):
+	def new_context(self, context):
 		raise NotImplementedError() 
 
-	def context(self):
+	def context(self, context = None):
 		self.alloc()
-		return self.new_context()
+		if context is None:
+			context = self.shared_context
+		return self.new_context(context)
 
 # helper class to determine the minimum set of changes to build a jsvalue in terms of javascript statements
 class jsvalue_evaluator:
@@ -1884,27 +1945,19 @@ class javascript_context_accessor:
 
 # javascript
 class javascript_context(jscore_context):
-	def __init__(self, runtime):
-		super().__init__(runtime)
-		self.accessor = None
+	def __init__(self, runtime, context = None):
+		super().__init__(runtime, context)
 
 	def allocate(self):
 		super().allocate()
-		self.accessor = javascript_context_accessor(self)
 
 	def deallocate(self):
-		self.accessor = None
 		super().deallocate()
-	
-	@property
-	def js(self):
-		self.alloc()
-		return self.accessor
 
 
 class javascript_runtime(jscore_runtime):
-	def new_context(self):
-		return javascript_context(self)
+	def new_context(self, context):
+		return javascript_context(self, context)
 
 # wasm (WebAssembly)
 class wasm_namespace:
@@ -2092,8 +2145,8 @@ class wasm_module:
 
 
 class wasm_context(jscore_context):
-	def __init__(self, runtime):
-		super().__init__(runtime)
+	def __init__(self, runtime, context = None):
+		super().__init__(runtime, context)
 		self._modules = {}
 		self._imports = {}
 		self._namespace = wasm_namespace(self._imports)
@@ -2176,8 +2229,8 @@ class wasm_context(jscore_context):
 
 
 class wasm_runtime(jscore_runtime):
-	def new_context(self):
-		return wasm_context(self)
+	def new_context(self, context):
+		return wasm_context(self, context)
 
 
 if __name__ == '__main__':
@@ -2444,5 +2497,14 @@ if __name__ == '__main__':
 
 	context.destroy()
 	runtime.destroy()
-	print(jscore._runtimes)
-	print(jscore._runtime_vm)
+
+	js_context = jscore.js()
+	js_context.js.hello = "javascript"
+	
+	wasm_context = jscore.wasm()
+	print(wasm_context.js.hello)
+	wasm_context.js.hello = "wasm"
+	
+	print(js_context.js.hello)
+	
+	jscore.destroy()
