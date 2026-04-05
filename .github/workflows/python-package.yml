@@ -59,7 +59,6 @@ jobs:
         path: dist
   test-pypi-publish:
     needs: build
-    if: ${{ 'enabled' == 'false' }}
     name: Publish to TestPyPI
     runs-on: ubuntu-latest
     environment: testpypi
