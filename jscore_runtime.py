@@ -548,12 +548,14 @@ class jscore:
 		JSCoreModuleLoaderDelegate_didEvaluateModule_
 	])
 	
+	_runtime_vm = None
 	_runtimes = {}
+	_runtime_cleanups = []
 	@classmethod
-	def new_runtime(cls, runtime_class):
+	def new_runtime(cls, runtime_class, *args, **kwargs):
 		if runtime_class is None:
 			raise ValueError("runtime_class must be specified")
-		return runtime_class()
+		return runtime_class(*args, **kwargs)
 	
 	# runtime singleton access
 	@classmethod
@@ -562,16 +564,52 @@ class jscore:
 			runtime_class = javascript_runtime
 		runtime = jscore._runtimes.get(runtime_class)
 		if runtime is None:
-			runtime = cls.new_runtime(runtime_class)
+			if cls._runtime_vm is None:
+				cls._runtime_vm = cls.vm_allocate()
+			runtime = cls.new_runtime(runtime_class, cls._runtime_vm)
 			jscore._runtimes[runtime_class] = runtime
 		return runtime
-
+		
 	@classmethod
-	def runtime_destroy(cls, runtime):
+	def vm_allocate(cls):
+		vm = jscore.JSVirtualMachine.alloc().init()
+		retain_global(vm)
+		return vm
+	
+	@classmethod
+	def vm_deallocate(cls, vm):
+		release_global(vm)
+	
+	@classmethod
+	def runtime_deallocate(cls, runtime, vm_owner):
+		vm = runtime.vm
+		if vm_owner:
+			cls.vm_deallocate(vm)
+		runtime.vm = None # always drop the vm reference as the runtime is done with it
+		runtime_scripts = list(runtime.scripts)
+		def cleanup():
+			released = [] # avoid releasing more than once
+			for script in runtime_scripts:
+				if not script in released:
+					if isinstance(script, jsscript_ref):
+						script.release()
+					else:
+						release_global(script)
+					released.append(script)
+		if vm_owner:
+			cleanup()
+		else:
+			cls._runtime_cleanups.append(cleanup)
 		key = runtime.__class__
-		rt = jscore._runtimes.get(key)
+		rt = cls._runtimes.get(key)
 		if runtime is rt: # remove destroyed runtime if its a tracked singleton instance
-			del jscore._runtimes[key]
+			del cls._runtimes[key]
+			if len(cls._runtimes) == 0:
+				cls.vm_deallocate(cls._runtime_vm) # if we destroyed the last singleton runtime reference cleanup vm
+				cls._runtime_vm = None
+				for cleanup in cls._runtime_cleanups:
+					cleanup()
+				cls._runtime_cleanups = []
 	
 	_context_ref_context_lookup = {}
 	@classmethod
@@ -1477,8 +1515,9 @@ class jscore_context:
 	
 
 class jscore_runtime:
-	def __init__(self):
-		self.vm = None
+	def __init__(self, vm = None):
+		self.vm = vm
+		self.vm_owner = self.vm is None
 		self.depth = 0
 		self.module_paths = {}
 		self.scripts = []
@@ -1486,26 +1525,17 @@ class jscore_runtime:
 	def allocate(self):
 		if self.vm is not None:
 			raise Exception("VM already allocated. Do not call allocate/deallocate manually")
-		self.vm = jscore.JSVirtualMachine.alloc().init()
-		retain_global(self.vm)
+		self.vm = jscore.vm_allocate()
+		self.vm_owner = True
 	
 	def deallocate(self):
 		if self.vm is None:
 			raise Exception("VM already deallocated. Do not call allocate/deallocate manually")
-		release_global(self.vm)
+		jscore.runtime_deallocate(self, self.vm_owner)
 		self.vm = None
-		released = [] # avoid releasing more than once
-		for script in self.scripts:
-			if not script in released:
-				if isinstance(script, jsscript_ref):
-					script.release()
-				else:
-					release_global(script)
-				released.append(script)
 		self.scripts = []
 		self.module_paths = {}
-		jscore.runtime_destroy(self)
-	
+
 	def alloc(self):
 		if self.vm is not None:
 			return
@@ -2407,7 +2437,7 @@ if __name__ == '__main__':
 	if simple_module_path.exists():
 		header("simple.wasm")
 		simple_module = wasm_module.from_file("./simple.wasm")
-		simple_module.imports.my_namespace.imported_func = lambda v: print(v)
+		simple_module.imports.my_namespace.imported_func = lambda *v: print(*v)
 		context.load_module(simple_module)
 		print(simple_module.exports)
 		simple_module.exports.exported_func()
@@ -2415,3 +2445,4 @@ if __name__ == '__main__':
 	context.destroy()
 	runtime.destroy()
 	print(jscore._runtimes)
+	print(jscore._runtime_vm)
