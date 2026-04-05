@@ -1,8 +1,12 @@
 """
 Pythonista JSCore Runtime Framework - Execute JavaScript and WebAssembly with seamless interop support natively in Pythonista 3.
 Develop apps with Python, JavaScript and WebAssembly libraries, components and code. 
-[Compile and run WebAssembly from sources with a Binaryen.js toolchain, including Python packages with C extensions.]
+
+https://github.com/M4nw3l/pythonista-jscore-runtime
 """
+
+__version__ = '0.0.1'
+
 from ctypes import *
 from ctypes.util import find_library
 from objc_util import *
