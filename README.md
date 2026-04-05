@@ -37,7 +37,7 @@ Or download [jscore_runtime.py](jscore_runtime.py) from the repository and copy 
 ## Usage
 ### Javascript Runtime
 JSCore Runtime supports both the context management and explicit create/destroy usage paradigms. 
-Alongside also automatically managed (singleton) quick/convenience evaluation and more explicit/multiple virtual machine and contexts instancing for advanced control. 
+It provides singletons for convenience evaluation and while also allows more explicit management of multiple virtual machines and contexts with its class model.
 
 A runtime singleton can be obtained from the `jscore` static class.
 ```python
@@ -213,7 +213,7 @@ function _jscore_wasm_load(name, wasm_bin, namespace){
 Calling `wasm_context.load_module` will call this function to create `WebAssembly.Module` and `WebAssebly.Instance` instances in JavaScript with a WebAssembly binary passed as an `Uint8Array` typed array instance and an imports namespace. 
 
 #### Example: Loading and calling Mozilla's simple.wasm
-An end to end example of loading and using a WebAssembly from Pythonista can be demonstrated by replicating [Mozilla's Loading Wasm Modules in Javascript](https://developer.mozilla.org/en-US/docs/WebAssembly/Guides/Using_the_JavaScript_API#loading_wasm_modules_in_javascript) example.
+An end to end example of loading and using a WebAssembly module from Pythonista can be demonstrated by replicating [Mozilla's Loading Wasm Modules in Javascript](https://developer.mozilla.org/en-US/docs/WebAssembly/Guides/Using_the_JavaScript_API#loading_wasm_modules_in_javascript) example.
 
 - Firstly, download the [simple.wasm](https://raw.githubusercontent.com/mdn/webassembly-examples/master/js-api-examples/simple.wasm) module from the page. 
 - After downloading simple.wasm, the next step is to copy this into Pythonista. To do this, navigate to the simple.wasm file in your Files app, then select the file and open the sharing sheet, then tap "Run Pythonista Script" and then choose the "Import File" option. 
