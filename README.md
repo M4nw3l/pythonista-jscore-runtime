@@ -8,15 +8,17 @@ The projects overall long term goals aim to offer three core capabilities/featur
 - Support Python packages/modules with extensions which can be cross-compiled to WebAssmembly from languages such as C.
 
 A (very) simple example:
+
 ```python
 
 from jscore_runtime import *
 
-with (jscore.runtime() as runtime, runtime.context() as context):
-  context.eval('function hello_world () { return "hello world"; }')
-  print(context.js.hello_world())
-  context.js.value_from_python = ["hello", "from", "python", 1, 2.2, 3.333333, {"object":"value", "nested":{"obj":["array", [], {}]}}]
-  print(context.eval('value_from_python[2] = "javascript"; value_from_python;').value)
+context = jscore.javascript()
+
+context.eval('function hello_world () { return "hello world"; }')
+print(context.js.hello_world())
+context.js.value_from_python = ["hello", "from", "python", 1, 2.2, 3.333333, {"object":"value", "nested":{"obj":["array", [], {}]}}]
+print(context.eval('value_from_python[2] = "javascript"; value_from_python;').value)
 
 # output: 
 # hello world
@@ -240,7 +242,6 @@ Modules loading has been made to closely align with javascript with a couple of 
 
 ## Known issues
 - Loading javascript files from remote sources / cdns etc is not implemented (yet).
-- Modules and scripts loading may not work correctly for some javascript libraries and they may need manual adjustments to work currently.
+- Modules and scripts loading may not work correctly for some javascript libraries and they may need manual adjustments to work correctly.
 - ModulesLoaderDelegate is using a private protcol / api as there is no other way to access the functionality otherwise.
-- JSScript source code strings are C++ objects which are more awkward structures to read with ctypes. A work around of separately loading a copy of the script source is used at the moment, so any module preprocessing performed when loading a JSScript is lost currently.
 
