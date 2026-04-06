@@ -548,6 +548,32 @@ class jscore:
 		JSCoreModuleLoaderDelegate_didEvaluateModule_
 	])
 	
+	# representation of WTFString
+	class WTFString(Structure):
+		class WTFStringData(Union):
+			_fields_ = [
+				("m_data8", c_char_p),
+				("m_data16", c_wchar_p),
+				("m_data8Char", c_char_p),
+				("m_data16Char", c_wchar_p)	
+			]
+		_fields_ = [
+			("m_refCount", c_uint32),
+			("m_length", c_uint),
+			("m_data", WTFStringData),
+			("m_hashAndFlags", c_uint)
+		]
+		
+		def is_8bit(self):
+			return self.m_hashAndFlags & 4 != 0
+			
+		def to_str(self):
+			if self.is_8bit():
+				return string_at(self.m_data.m_data8, self.m_length).decode()
+			return wstring_at(self.m_data.m_data16, self.m_length).decode()
+			
+	WTFStringPtr = POINTER(POINTER(WTFString))
+	
 	_runtime_vm = None
 	_runtime_context = None
 	_runtimes = {}
@@ -706,7 +732,19 @@ class jscore:
 		str_utf16 = objc.c_array(str_py.encode("utf-16le"))
 		str_ref = jscore.JSStringCreateWithCharacters(str_utf16, str_len)
 		return cast(cls.JSStringRetain(str_ref), c_void_p)
-	
+
+	@classmethod
+	def jsscript_source_to_str(cls, script):
+		if not objc.ns_subclass_of(script, cls.JSScript):
+			raise Exception(f"'{script}' is not a JSScript instance")
+		source_ptr = cast(script.source(), cls.WTFStringPtr)
+		if source_ptr is None or source_ptr.contents is None:
+			return None
+		source_wtf = source_ptr.contents.contents
+		if source_wtf is None:
+			return None
+		return source_wtf.to_str()
+
 	@classmethod
 	def jsobjectref_keys(cls, context_ref, value_ref):
 		names = []
@@ -1340,7 +1378,6 @@ class jscore_module_loader:
 		self.context = context.context
 		self.scripts = {}
 		self.modules = {}
-		self.sources = {}
 		self.delegate = jscore.JSCoreModuleLoaderDelegate.alloc().init().autorelease()
 		retain_global(self.delegate)
 		self.delegate._pyinstance = weakref.ref(self)
@@ -1363,7 +1400,7 @@ class jscore_module_loader:
 		script = self.modules.get(module)
 		if script is None:
 			script = self.load_file(module, jscore.kJSScriptTypeModule)
-		source = self.sources.get(module)
+		source = jscore.jsscript_source_to_str(script)
 		if script is not None and source is not None:
 			result = self.pycontext.eval(source)
 			exception = result.exception
@@ -1383,34 +1420,18 @@ class jscore_module_loader:
 		
 	def did_eval_module(self, url):
 		print(f"did eval {url}")
-		
-	def preprocess_source(self, scriptType, path, source):
-		return source
-		
-	def load_script_source(self, script, scriptType, path, sourceUrl, source = None):
-		# we have to use lookups until we can decode strings directly from either:
-		# WTF::String on script.source()
-		# JSC:JSSourceCode* on script.jsSourceCode()
-		# JSC::SourceCode on script.sourceCode()
+
+	def load_script(self, script, scriptType, path, sourceUrl, source = None):
 		file_path = self.runtime.get_file_path(path)
 		path_no_ext = str(file_path.with_suffix(''))
-		if source is None:
-			with open(file_path) as script_file:
-				source = script_file.read()
-		source = self.preprocess_source(scriptType, file_path, source)
-		sources = self.sources
-		sources[path] = source
-		sources[path_no_ext] = source
-		sources[f"file://{path_no_ext}"] = source
-		sources[sourceUrl] = source
-
 		lookup = self.modules if scriptType == jscore.kJSScriptTypeModule else self.scripts
-		lookup[source] = script
+		if source is not None:
+			lookup[source] = script
 		lookup[path] = script
 		lookup[path_no_ext] = script
 		lookup[f"file://{path_no_ext}"] = script
 		lookup[sourceUrl] = script
-	
+
 	def load_source(self, source, scriptType, modulePath = None):
 		lookup = self.modules if scriptType == jscore.kJSScriptTypeModule else self.scripts
 		script = lookup.get(source)
@@ -1423,9 +1444,9 @@ class jscore_module_loader:
 		script, sourceUrl, exception = self.runtime.load_source(source, scriptType, path)
 		if exception is not None: 
 			 raise ImportError(exception)
-		self.load_script_source(script, scriptType, path, sourceUrl, source)
+		self.load_script(script, scriptType, path, sourceUrl, source)
 		return script
-		
+
 	def load_file(self, path, scriptType):
 		lookup = self.modules if scriptType == jscore.kJSScriptTypeModule else self.scripts
 		script = lookup.get(path)
@@ -1438,7 +1459,7 @@ class jscore_module_loader:
 		script, sourceUrl, exception = self.runtime.load_file(path, scriptType)
 		if exception is not None: 
 			 raise ImportError(exception)
-		self.load_script_source(script, scriptType, path, sourceUrl)
+		self.load_script(script, scriptType, path, sourceUrl)
 		return script
 
 
