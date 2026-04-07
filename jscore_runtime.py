@@ -679,28 +679,27 @@ class jscore:
 			if len(cls._runtimes) == 0:
 				cls._runtimes_cleanup()
 	
-	_context_ref_context_lookup = {}
+	_context_lookup = {}
+	_prototype_lookup = {}
 	@classmethod
 	def context_allocate(cls, vm):
 		context = jscore.JSContext.alloc().initWithVirtualMachine_(vm)
 		retain_global(context)
 		context.setInspectable(True)
 		context_ref = context.JSGlobalContextRef()
-		cls._context_ref_context_lookup[context_ref.value] = context
+		metadata = cls._context_metadata(context, context_ref, dict(cls._prototype_lookup))
+		cls._context_lookup[context] = metadata
+		cls._context_lookup[context_ref.value] = metadata
 		return context
 	
 	@classmethod
 	def context_deallocate(cls, context):
 		context_ref = context.JSGlobalContextRef()
-		del cls._context_ref_context_lookup[context_ref.value]
+		metadata = cls._context_lookup[context]
+		del cls._context_lookup[context]
+		del cls._context_lookup[context_ref.value]
 		release_global(context)
-		
-	@classmethod
-	def context_ref_to_context(cls, context_ref):
-		if context_ref is None:
-			return None
-		return cls._context_ref_context_lookup[context_ref.value]
-	
+
 	@classmethod
 	def context_eval(cls, context, script, sourceUrl = None):
 		result = None
@@ -713,6 +712,67 @@ class jscore:
 		if ex is not None:
 			context.setException(None) # clear exception if set
 		return result, ex
+
+	@classmethod
+	def context_ref_to_context(cls, context_ref):
+		if context_ref is None:
+			return None
+		return cls._context_metadata.get(context_ref).context
+	
+	class _prototype_metadata:
+		def __init__(self, name, layout):
+			self.name = name
+			self.layout = layout
+	
+	class _context_metadata:
+		_context_lookup = None
+		def __init__(self, context, context_ref, prototypes):
+			self._context_lookup[context] = self
+			self._context_lookup[context_ref.value] = self
+			self.context = context
+			self.context_ref = context_ref
+			self.jsvalueref_to_jsvalue_object = jscore.JSValue.valueWithNewObjectInContext_(context)
+			self.jsvalueref_to_jsvalue_object_ref = self.jsvalueref_to_jsvalue_object.JSValueRef()
+			self.undefined_jsvalue = jscore.JSValue.valueWithUndefinedInContext_(context)
+			get_prototypes,ex = jscore.context_eval(self.context, """(function(){
+				return function(prototypes) {
+					const wrappers = {};
+					for(const [name, metadata] of Object.entries(prototypes)) {
+						const _class = this[name];
+						const _prototype = _class.prototype;
+						const wrapper = {
+							"_class_": _class,
+							"_prototype_": _prototype
+						};
+						for(const field of metadata.layout) {
+							wrapper[field] = _prototype[field];
+						}
+						wrappers[name] = wrapper;
+					}
+					return wrappers;
+				};
+			})();""")
+			js_get_prototypes = jscore.jsvalue_to_py(get_prototypes)
+			js_prototypes = js_get_prototypes.call(prototypes)
+			self.prototypes = {}
+			for key,prototype in js_prototypes.jsobject:
+				_class = (~prototype._class_).JSValueRef()
+				_prototype = (~prototype._prototype_).JSValueRef()
+				self.prototypes[_class.value] = prototype
+				self.prototypes[_prototype.value] = prototype
+		
+		@classmethod
+		def get(cls, id):
+			if isinstance(id, c_void_p):
+				return cls._context_lookup[id.value]
+			return cls._context_lookup[id]
+
+	_context_metadata._context_lookup = _context_lookup
+	
+	@classmethod
+	def prototype_register(cls, name, layout):
+		metadata = cls._prototype_metadata(name, layout)
+		cls._prototype_lookup[name] = metadata
 	
 	# jscore values conversions 
 	@classmethod
@@ -764,19 +824,81 @@ class jscore:
 		return context_ref, value_ref
 	
 	@classmethod
-	def jsvalue_jsobject_to_py(cls, value):
-		context_ref, value_ref = cls.jsvalue_get_refs(value)
+	def jsvalueref_to_jsvalue(cls, context_ref, value_ref, index = 0, metadata = None):
+		# obtain a jsvalue by setting it by value_ref into an object with the c-api
+		# then retrieving it from the objc side of that objects jsvalue accessor.
+		# this works where other methods that are more suggestive towards this purpose don't such as valueWithJSValueRef:inContext:
+		# JSValue.initWithValue:inContext: or the wrapperMap, which either crash or don't seem to yield an expected jsvalue for the ref given...
+		if metadata is None:
+			metadata = cls._context_metadata.get(context_ref)
+		ex_ref = c_void_p(None)
+		cls.JSObjectSetPropertyAtIndex(context_ref, metadata.jsvalueref_to_jsvalue_object_ref, index, value_ref, byref(ex_ref))
+		jsvalue = metadata.jsvalueref_to_jsvalue_object.valueAtIndex(index)
+		metadata.jsvalueref_to_jsvalue_object.setValue_atIndex_(index, metadata.undefined_jsvalue)
+		return jsvalue
+	
+	@classmethod
+	def jsvalueref_get_prototype(cls, context_ref, value_ref):
+		prototype_ref = cls.JSObjectGetPrototype(context_ref, value_ref)
+		metadata = cls._context_metadata.get(context_ref)
+		metadata_prototype = metadata.prototypes.get(prototype_ref)
+		
+		if metadata_prototype is None:
+			seen = []
+			for key,p in dict(metadata.prototypes).items():
+				class_ref = (~p._class_).JSValueRef()
+				if not class_ref in seen and jscore.JSValueIsObjectOfClass(context_ref, value_ref, class_ref):
+					return (~p).JSValueRef()
+				seen.append(class_ref)
+		else:
+			return (~metadata_prototype).JSValueRef()
+		return cast(prototype_ref, c_void_p)
+	
+	@classmethod
+	def jsvalue_get_prototype(cls, value, context_ref = None, value_ref = None):
+		if value_ref is None:
+			context_ref, value_ref = cls.jsvalue_get_refs(value)
+		prototype_ref = cls.jsvalueref_get_prototype(context_ref, value_ref)
+		return cls.jsvalueref_to_jsvalue(context_ref, prototype_ref)
+	
+	@classmethod
+	def jsvalue_jsobject_to_py(cls, value, context_ref = None, value_ref = None, parent_ref = None):
+		if value_ref is None:
+			context_ref, value_ref = cls.jsvalue_get_refs(value)
 		if jscore.JSObjectIsFunction(context_ref, value_ref):
-			return javascript_function(value, context_ref, value_ref)
-		return cls.jsobjectref_to_py(context_ref, value_ref)
+			return javascript_function(value, context_ref, value_ref, parent_ref)
+		keys = cls.jsobjectref_keys(context_ref, value_ref)
+		if value.isArray():
+			count = len(keys)
+			items = []
+			for i in range(count):
+				v = value.valueAtIndex_(i)
+				v = cls.jsvalue_to_py(v, value_ref)
+				items.append(v)
+			return items
+		prototype = cls.jsvalue_get_prototype(value, context_ref, value_ref)
+		obj = cls.jsvalue_to_py(prototype, value_ref if parent_ref is None else parent_ref)
+		if javascript_value.is_null_or_undefined(obj):
+			obj = {}
+		for key in keys:
+			v = value.valueForProperty_(key)
+			v = cls.jsvalue_to_py(v, value_ref if parent_ref is None else parent_ref)
+			obj[key] = v
+		return obj
 
 	@classmethod
-	def jsvalue_to_py(cls, value):
-		if value is None or value.isNull():
-			return None
-
-		if javascript_value.is_undefined(value) or value.isUndefined():
+	def jsvalue_to_py(cls, value, parent_ref = None):
+		if javascript_value.is_null_or_undefined(value):
+			return value
+			
+		if not objc.ns_subclass_of(value, cls.JSValue):
+			raise Exception("Value must be JSValue")
+		
+		if value.isUndefined():
 			return javascript_value.undefined
+		
+		if value.isNull():
+			return None
 			
 		if value.isBoolean():
 			return value.toBool()
@@ -787,37 +909,40 @@ class jscore:
 		if value.isSymbol():
 			return javascript_symbol(value)
 		
-		return cls.jsvalue_jsobject_to_py(value)
+		return cls.jsvalue_jsobject_to_py(value, parent_ref = parent_ref)
 
 	@classmethod
-	def jsvalue_is_object(cls, value):
+	def jsvalue_is_object(cls, value, context_ref = None, value_ref = None):
 		if javascript_value.is_undefined(value) or not value.isObject():
 			return False
-		context_ref, value_ref = cls.jsvalue_get_refs(value)
+		if value_ref is None:
+			context_ref, value_ref = cls.jsvalue_get_refs(value)
 		if jscore.JSObjectIsFunction(context_ref, value_ref):
 			return False
 		return True
 		
 	@classmethod
-	def jsvalue_is_array_type(cls, value, typedArrayType):
+	def jsvalue_is_array_type(cls, value, typedArrayType, context_ref = None, value_ref = None):
 		if not objc.ns_subclass_of(value, jscore.JSValue):
 			return False
-		context_ref, value_ref = cls.jsvalue_get_refs(value)
+		if value_ref is None:
+			context_ref, value_ref = cls.jsvalue_get_refs(value)
 		ex = c_void_p(None)
 		arrayType = cls.JSValueGetTypedArrayType(context_ref, value_ref, byref(ex))
 		return arrayType == typedArrayType
 	
 	@classmethod
-	def jsobject_get_keys(cls, value):
+	def jsobject_get_keys(cls, value, context_ref = None, value_ref = None):
 		if javascript_value.is_undefined(value) or not value.isObject():
 			return []
-		context_ref, value_ref = cls.jsvalue_get_refs(value)
+		if value_ref is None:
+			context_ref, value_ref = cls.jsvalue_get_refs(value)
 		if jscore.JSObjectIsFunction(context_ref, value_ref):
 			return []
 		return cls.jsobjectref_keys(context_ref, value_ref)
 	
 	@classmethod
-	def jsobjectref_to_py(cls, context_ref, value_ref):
+	def jsobjectref_to_py(cls, context_ref, value_ref, parent_ref = None):
 		ex = c_void_p(None)
 		value_ref = cls.JSValueToObject(context_ref, value_ref, byref(ex))
 		if cls.JSObjectIsFunction(context_ref, value_ref):
@@ -825,7 +950,7 @@ class jscore:
 			source = None
 			if str_ref:
 				source = cls.jsstringref_to_py(str_ref)
-			return javascript_function(None, context_ref, value_ref, source)
+			return javascript_function(None, context_ref, value_ref, parent_ref, source)
 		names_ref = cls.JSObjectCopyPropertyNames(context_ref, value_ref)
 		count = cls.JSPropertyNameArrayGetCount(names_ref)
 		obj = None
@@ -834,22 +959,22 @@ class jscore:
 			for i in range(count):
 				key_ref = cls.JSPropertyNameArrayGetNameAtIndex(names_ref, i)
 				jsvalue_ref = cls.JSObjectGetProperty(context_ref, value_ref, key_ref, byref(ex))
-				obj.append(cls.jsvalueref_to_py(context_ref, jsvalue_ref))
+				obj.append(cls.jsvalueref_to_py(context_ref, jsvalue_ref, value_ref))
 		else:
-			prototype_ref = cls.JSObjectGetPrototype(context_ref, value_ref)
-			obj = cls.jsvalueref_to_py(context_ref, prototype_ref)
+			prototype_ref = cls.jsvalueref_get_prototype(context_ref, value_ref)
+			obj = cls.jsvalueref_to_py(context_ref, prototype_ref, value_ref if parent_ref is None else parent_ref)
 			if javascript_value.is_null_or_undefined(obj):
 				obj = {}
 			for i in range(count):
 				key_ref = cls.JSPropertyNameArrayGetNameAtIndex(names_ref, i)
 				jsvalue_ref = cls.JSObjectGetProperty(context_ref, value_ref, key_ref, byref(ex))
 				key = cls.jsstringref_to_py(key_ref)
-				obj[key] = cls.jsvalueref_to_py(context_ref, jsvalue_ref)
+				obj[key] = cls.jsvalueref_to_py(context_ref, jsvalue_ref, value_ref)
 		cls.JSPropertyNameArrayRelease(names_ref)
 		return obj
 	
 	@classmethod
-	def jsvalueref_to_py(cls, context_ref, value_ref):
+	def jsvalueref_to_py(cls, context_ref, value_ref, parent_ref = None):
 		if value_ref is None:
 			return None
 		if cls.JSValueIsUndefined(context_ref, value_ref):
@@ -878,7 +1003,7 @@ class jscore:
 			symbol = cls.jsstringref_to_py(str_ref)
 			return javascript_symbol(symbol)
 		if cls.JSValueIsObject(context_ref, value_ref):
-			return cls.jsobjectref_to_py(context_ref, value_ref)
+			return cls.jsobjectref_to_py(context_ref, value_ref, parent_ref)
 		raise NotImplementedError("Unknown value_ref type")
 
 	@classmethod
@@ -906,8 +1031,10 @@ class jscore:
 			return cls.JSValueMakeString(context_ref, str_ref)
 		if isinstance(value, javascript_function):
 			source = str(value)
-			value_ref = javascript_function.from_source(source, context_ref).compile()
+			value_ref = javascript_function.from_source(source, context_ref, parent_ref).compile()
 			return value_ref
+		if callable(value):
+			value = javascript_callback(value)
 		if isinstance(value, javascript_callback):
 			value_ref = value.get_jsvalue_ref(context_ref, parent_ref)
 			return value_ref
@@ -927,7 +1054,7 @@ class jscore:
 			if bytes_ptr is not None:
 				value.getBytes_length_(bytes_ptr, count)
 			return value_ref
-		if isinstance(value, list):
+		if isinstance(value, list) or isinstance(value, set):
 			ex_ref = c_void_p(None)
 			value_ref = cls.JSObjectMakeArray(context_ref, 0, None, byref(ex_ref))
 			count = len(value)
@@ -935,16 +1062,20 @@ class jscore:
 				val_ref = cls.py_to_jsvalueref(context_ref, value[i], value_ref)
 				cls.JSObjectSetPropertyAtIndex(context_ref, value_ref, i, val_ref, byref(ex_ref))
 			return value_ref
-		if isinstance(value, dict):
-			value_ref = cls.JSObjectMake(context_ref, None, None)
-			ex_ref = c_void_p(None)
-			for k,v in value.items():
-				key_ref = cls.str_to_jsstringref(k)
-				val_ref = cls.py_to_jsvalueref(context_ref, v, value_ref)
-				cls.JSObjectSetProperty(context_ref, value_ref, key_ref, val_ref, 0, byref(ex_ref))
-			return value_ref
-		typ = type(value)
-		raise NotImplementedError(f"Type '{typ}' for value '{value}' not supported.")
+		if not isinstance(value, dict):
+			try:
+				value = vars(value)
+			except Exception as e:
+				value = {}
+				#print(type(value), value)
+				#raise e
+		value_ref = cls.JSObjectMake(context_ref, None, None)
+		ex_ref = c_void_p(None)
+		for k,v in value.items():
+			key_ref = cls.str_to_jsstringref(k)
+			val_ref = cls.py_to_jsvalueref(context_ref, v, value_ref)
+			cls.JSObjectSetProperty(context_ref, value_ref, key_ref, val_ref, 0, byref(ex_ref))
+		return value_ref
 		
 	@classmethod
 	def py_to_jsvalueref(cls, context_ref, value, parent_ref = None):
@@ -978,6 +1109,8 @@ class jscore:
 			# further escaping and resolving may be required here...
 			jsvalue, ex  = cls.context_eval(context, f'(function() {{ return ({source}); }})()') 
 			return jsvalue
+		if callable(value):
+			value = javascript_callback(value)
 		if isinstance(value, javascript_callback):
 			jsvalue = value.get_jsvalue(context, parent)
 			return jsvalue
@@ -999,26 +1132,40 @@ class jscore:
 			if bytes_ptr is not None:
 				value.getBytes_length_(bytes_ptr, count)
 			return jsvalue
-		if isinstance(value, dict):
-			jsvalue = cls.JSValue.valueWithNewObjectInContext_(context)
-			for k,v in value.items():
-				val = cls.py_to_jsvalue(context, v, jsvalue)
-				jsvalue.setValue_forProperty_(val, k)
-			return jsvalue
-		if isinstance(value, list):
+		if isinstance(value, list) or isinstance(value, set):
 			jsvalue = cls.JSValue.valueWithNewArrayInContext_(context)
 			for i in range(len(value)):
 				val = cls.py_to_jsvalue(context, value[i], jsvalue)
-				jsvalue.setValue_atIndex_(i, val)
+				jsvalue.setValue_atIndex_(val, i)
 			return jsvalue
-		typ = type(value)
-		raise NotImplementedError(f"Type '{typ}' for value '{value}' not supported.")
+		if not isinstance(value, dict):
+			try:
+				value = vars(value)
+			except Exception as e:
+				value = {}
+				#print(type(value), value)
+				#raise e
+		jsvalue = cls.JSValue.valueWithNewObjectInContext_(context)
+		for k,v in value.items():
+			val = cls.py_to_jsvalue(context, v, jsvalue)
+			jsvalue.setValue_forProperty_(val, k)
+		return jsvalue
 
 	@classmethod
 	def py_to_js(cls, value):
 		value = jsobject_accessor.unwrap(value)
 		return json.dumps(value, cls=javascript_encoder)
+	
+	_initialised = False
+	@classmethod
+	def _init(cls):
+		if cls._initialised:
+			return
+		cls.prototype_register("Promise", ["then", "catch", "finally"])
+		cls._initialised = True
 
+# init metadata
+jscore._init()
 
 class javascript_encoder(json.JSONEncoder):
 	# An overriden json encoder to write javascript objects encoding functions / raw literal js 
@@ -1067,10 +1214,11 @@ class javascript_symbol:
 
 
 class javascript_function:
-	def __init__(self, jsvalue = None, context_ref = None, value_ref = None, source = None):
+	def __init__(self, jsvalue = None, context_ref = None, value_ref = None, parent_ref = None, source = None):
 		self.jsvalue = jsvalue
 		self.context_ref = context_ref
 		self.value_ref = value_ref
+		self.parent_ref = parent_ref
 		self.source = source
 
 	def compile(self, context_ref = None):
@@ -1103,33 +1251,31 @@ class javascript_function:
 			raise ImportError("Exception compiling function: {exception}")
 		return self.value_ref
 	
-	def js_arg(self, context, arg):
-		if javascript_value.is_null_or_undefined(arg):
-			return jscore.py_to_jsvalue(context, arg)
+	def ns_arg(self, context, arg):
 		if isinstance(arg, dict):
 			copy = {}
 			for k,v in arg.items():
-				copy[k]=self.js_arg(context, v)
+				copy[k]=self.ns_arg(context, v)
 			return copy
 		if isinstance(arg, list):
 			copy = []
 			for i in range(len(arg)):
-				copy.append(self.js_arg(context, arg[i]))
+				copy.append(self.ns_arg(context, arg[i]))
 			return copy
-		if isinstance(arg, javascript_function):
-			return jscore.py_to_jsvalue(context, arg)
-		return arg
+		return jscore.py_to_jsvalue(context, arg)
 	
-	def js_args(self, context, args):
+	def ns_args(self, context, args):
 		args = list(args)
-		args = self.js_arg(context, args)
+		args = self.ns_arg(context, args)
 		nsargs = ns(args)
 		return nsargs
 
-	def call(self, *args):
-		if self.jsvalue is not None:
+	def call(self, *args, this = None):
+		if this is None and self.parent_ref is not None:
+			this = self.parent_ref
+		if self.jsvalue is not None and this is None:
 			context = self.jsvalue.context()
-			nsargs = self.js_args(context, args)
+			nsargs = self.ns_args(context, args)
 			self.jsvalue.context().setException_(None)
 			value = self.jsvalue.callWithArguments_(nsargs)
 			exception = self.jsvalue.context().exception()
@@ -1148,13 +1294,18 @@ class javascript_function:
 			count = len(args)
 			args_ref = None
 			if count > 0:
-				args_ref = objc.c_array(count, lambda i: jscore.py_to_jsvalueref(self.context_ref, args[i]))
+				args_ref = objc.c_array(count, lambda i: jscore.py_to_jsvalueref(self.context_ref, args[i]), typ = c_void_p)
 			this_ref = None
+			if isinstance(this, c_void_p):
+				this_ref = this
+			elif objc.ns_subclass_of(this, jscore.JSValue):
+				this_ref = this.JSValueRef()
 			exception_ref = c_void_p(None)
 			value_ref = jscore.JSObjectCallAsFunction(self.context_ref, self.value_ref, this_ref, count, args_ref, byref(exception_ref))
 			if exception_ref.value is not None:
-				raise Exception(jscore.jsvalueref_to_py(exception_ref))
-			return javascript_value(None, self.context_ref, value_ref)
+				raise Exception(jscore.jsvalueref_to_py(self.context_ref, exception_ref))
+			jsvalue = jscore.jsvalueref_to_jsvalue(self.context_ref, value_ref)
+			return javascript_value(jsvalue, self.context_ref, value_ref)
 
 		raise NotImplementedError("Cannot call this type of javascript_function")
 
@@ -1163,8 +1314,8 @@ class javascript_function:
 		repr = str(self).strip()
 		return re.fullmatch("function[^\{]+\{[^\[]+\[native code\][^\}]+}", repr) is not None
 	
-	def __call__(self, *args):
-		return self.call(*args).value
+	def __call__(self, *args, **kwargs):
+		return self.call(*args, **kwargs).value
 
 	def __repr__(self):
 		if self.source is not None:
@@ -1173,7 +1324,7 @@ class javascript_function:
 			return str(self.jsvalue)
 		
 	@classmethod
-	def from_source(cls, source, context = None):
+	def from_source(cls, source, context = None, parent_ref = None):
 		context_ref = None
 		if isinstance(context, c_void_p):
 			context_ref = context
@@ -1182,7 +1333,7 @@ class javascript_function:
 				context = context.context
 			if objc.ns_subclass_of(context, jscore.JSContext):
 				context_ref = context.JSGlobalContextRef()
-		return cls(source=source, context_ref=context_ref)
+		return cls(source=source, context_ref=context_ref, parent_ref=parent_ref)
 
 
 class javascript_callback:
@@ -1230,7 +1381,7 @@ class javascript_callback:
 			value_ref = self.get_jsvalue_ref(context_ref, parent_ref)
 			if parent is None:
 				parent = context.globalObject()
-			self._jsvalue = parent.valueForProperty(self.name) # work around to obtain a jsvalue from jsvalue_ref
+			self._jsvalue = jscore.jsvalueref_to_jsvalue(context_ref, value_ref)
 		return self._jsvalue
 
 	def _invoke_callback(self, ctx, funcObj, thisObj, args_count, args, ex):
@@ -1288,6 +1439,44 @@ class javascript_object(dict):
 		else:
 			self[key] = value
 
+class jsvalue_accessor:
+	def __init__(self, jsvalue = None, context_ref = None, value_ref = None):
+		self.___jsvalue___ = jsvalue
+		if jsvalue is None:
+			self.___jsvalue___ = jscore.jsvalueref_to_jsvalue(context_ref, value_ref)
+
+	def __iter__(self):
+		self.___keys___ = jscore.jsobject_get_keys(self.___jsvalue___)
+		self.___keys___ = iter(self.___keys___)
+		return self
+		
+	def __next__(self):
+		key = next(self.___keys___)
+		return key, self.___get___(key)
+		
+	def __getattr__(self, key):
+		v = self.___get___(key)
+		return v
+		
+	def __getitem__(self, key):
+		v = self.___get___(key)
+		if v is None:
+			raise KeyError()
+		return v
+
+	def ___get___(self, name):
+		jsvalue = self.___jsvalue___
+		if not jsvalue.hasProperty_(name):
+			return None
+		v = jsvalue.valueForProperty_(name)
+		return jsvalue_accessor(v)
+
+	def __repr__(self):
+		return str(jscore.jsvalue_to_py(self.___jsvalue___))
+		
+	def __invert__(self):
+		return self.___jsvalue___
+
 
 class javascript_value:
 	undefined = javascript_undefined_value()
@@ -1306,19 +1495,30 @@ class javascript_value:
 	def __init__(self, jsvalue = None, context_ref = None, value_ref = None):
 		if jsvalue is None and context_ref is None and value_ref is None:
 			raise ArgumentError("Either jsvalue or context_ref and value_ref must be specified")
-		self.jsvalue = jsvalue
-		self.context_ref = context_ref
-		self.value_ref = value_ref
+		self._jsvalue = jsvalue
+		self._context_ref = context_ref
+		self._value_ref = value_ref
 		self._val = None
 		self._cached = False
+		self._keys = None
+	
+	@property
+	def jsvalue(self):
+		if self._jsvalue is not None:
+			return self._jsvalue
+		self._jsvalue = jscore.jsvalueref_to_jsvalue(self._context_ref, self._value_ref)
+		
+	@property
+	def jsobject(self):
+		return jsvalue_accessor(self._jsvalue, self._context_ref, self._value_ref)
 
 	@property
 	def value(self):
 		if not self._cached:
-			if self.jsvalue is not None:
-				self._val = jscore.jsvalue_to_py(self.jsvalue)
-			elif self.context_ref is not None and self.value_ref is not None:
-				self._val = jscore.jsvalueref_to_py(self.context_ref, self.value_ref)
+			if self._jsvalue is not None:
+				self._val = jscore.jsvalue_to_py(self._jsvalue)
+			elif self._context_ref is not None and self._value_ref is not None:
+				self._val = jscore.jsvalueref_to_py(self._context_ref, self._value_ref)
 			else:
 				self._val = javascript_value.undefined
 			if isinstance(self._val, dict):
@@ -1390,36 +1590,22 @@ class jscore_module_loader:
 		self.delegate = None
 		
 	def fetch_module(self, module, resolve, reject):
-		evaluated = self.evaluated.get(module)
-		if evaluated is not None:
-			if evaluated.exception is None:
-				resolve(evaluated.jsvalue)
-			else:
-				reject(evaluated.exception)
-			return
+		#print(module)
 		script = self.modules.get(module)
 		if script is None:
 			script = self.load_file(module, jscore.kJSScriptTypeModule)
-		source = jscore.jsscript_source_to_str(script)
-		if script is not None and source is not None:
-			result = self.pycontext.eval(source)
-			exception = result.exception
-			if exception is not None:
-				reject(exception)
-				print(f"Module load failed {module} {exception}")
-			else:
-				resolve(result.jsvalue)
-				print(f"Module load success {module}")
-			self.evaluated[module] = result
+		if script is not None:
+			resolve(script)
 		else:
-			reject(f"Module load failed {module}")
-			print(f"Module load failed {module}")
+			reject()
 			
 	def will_eval_module(self, url):
-		print(f"will eval {url}")
+		print(f"will eval: {url}")
+		pass
 		
 	def did_eval_module(self, url):
-		print(f"did eval {url}")
+		print(f"did eval: {url}")
+		pass
 
 	def load_script(self, script, scriptType, path, sourceUrl, source = None):
 		file_path = self.runtime.get_file_path(path)
@@ -1626,10 +1812,11 @@ class jscore_runtime:
 			return
 		self.deallocate()
 	
-	def get_module_path(self, source, modulePath = None):
-		path = self.module_paths.get(source)
-		if path is not None:
-			return path
+	def get_module_path(self, source = None, modulePath = None):
+		if source is not None:
+			path = self.module_paths.get(source)
+			if path is not None:
+				return path
 		if modulePath is not None:
 			modulePath = self.get_file_path(modulePath)
 			path = str(modulePath)
@@ -1646,10 +1833,15 @@ class jscore_runtime:
 		if not p.is_absolute():
 			p = Path.cwd().joinpath(p)
 		return p
+		
+	def get_source_url(self, source, modulePath):
+		path = Path(self.get_module_path(source, modulePath))
+		path = str(path.relative_to(Path.cwd()))
+		return path
 	
 	def load_source(self, source, scriptType = jscore.kJSScriptTypeProgram, modulePath = None):
 		loader = jscore.JSScript.scriptOfType_withSource_andSourceURL_andBytecodeCache_inVirtualMachine_error_
-		sourceUrl = self.get_module_path(source, modulePath)
+		sourceUrl = self.get_source_url(source, modulePath)
 		return self.load_script(loader, source, scriptType, sourceUrl)
 	
 	def load_file(self, path, scriptType = jscore.kJSScriptTypeProgram):
@@ -1659,7 +1851,7 @@ class jscore_runtime:
 			raise FileNotFoundError(f"Script file not found '{path}' ({p})")
 		path = str(p)
 		path = nsurl(path)
-		sourceUrl = str(p)
+		sourceUrl = self.get_source_url(None, p)
 		loader = jscore.JSScript.scriptOfType_memoryMappedFromASCIIFile_withSourceURL_andBytecodeCache_inVirtualMachine_error_
 		return self.load_script(loader, path, scriptType, sourceUrl)
 		
@@ -2480,10 +2672,26 @@ if __name__ == '__main__':
 	print(context.js.python_val)
 	print("context.eval('python_val();')")
 	print(context.eval('python_val();'))
+	
+	header("Python objects")
+	class MyObject:
+		def __init__(self):
+			self.hello = "world"
+	
+	context.js.my_object = MyObject()
+	print(context.js.my_object)
+	
+	header("Promise")
+	p = context.eval("""new Promise((resolve,reject) => { 
+		resolve("promise then");
+	});
+	""")
+	val = p.value.then(lambda v: print(v))
 
 	header("Modules/scripts")
-	context.eval_module_source("function module_source() { return 10; }", "sourcetest.js")
-	print(context.js.module_source)
+	#context.eval_module_source("function module_source() { return 10; }", "sourcetest.js")
+	print("import",context.eval("p = import('sourcetext.js'); p;").value.then(lambda v: print("modthen",v)))
+	#print(context.js.module.then())
 	#context.eval_module_file("./test.js")
 	#print(context.js.filetest)
 	#str_ref = jscore.str_to_jsstringref("test test")
@@ -2529,3 +2737,4 @@ if __name__ == '__main__':
 	print(js_context.js.hello)
 	
 	jscore.destroy()
+
