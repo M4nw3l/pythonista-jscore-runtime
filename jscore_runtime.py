@@ -1161,6 +1161,7 @@ class jscore:
 	def _init(cls):
 		if cls._initialised:
 			return
+		cls.prototype_register("Error", ["name", "message", "toString"])
 		cls.prototype_register("Promise", ["then", "catch", "finally"])
 		cls._initialised = True
 
@@ -1392,6 +1393,8 @@ class javascript_callback:
 		for i in range(args_count):
 			arg = c_void_p.from_address(args + (i * sizeof(c_void_p)))
 			arg_value = jscore.jsvalueref_to_py(ctx, arg)
+			if isinstance(arg_value, dict):
+				arg_value = javascript_object(arg_value)
 			callback_args.append(arg_value)
 		returnValue = self.callback(*callback_args)
 		returnJSValue_ref = jscore.py_to_jsvalueref(ctx, returnValue)
@@ -2690,7 +2693,7 @@ if __name__ == '__main__':
 
 	header("Modules/scripts")
 	#context.eval_module_source("function module_source() { return 10; }", "sourcetest.js")
-	print("import",context.eval("p = import('sourcetext.js'); p;").value.then(lambda v: print("modthen",v)))
+	print("import",context.eval("import('sourcetext.js');").value.then(lambda *v: print(v)).catch(lambda e: print("error",e.toString())))
 	#print(context.js.module.then())
 	#context.eval_module_file("./test.js")
 	#print(context.js.filetest)
