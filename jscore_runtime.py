@@ -2047,7 +2047,7 @@ class jsobject_accessor:
 			else:
 				path = ".".join([self.___path___, path])
 			return jsobject_accessor(self.___context___, value, path)
-		return jscore.jsvalue_to_py(value)
+		return jscore.jsvalue_to_py(value, self.___jsobject___)
 		
 	def ___set___(self, key, value):
 		current = self.___get___(key)
