@@ -880,10 +880,15 @@ class jscore:
 		obj = cls.jsvalue_to_py(prototype, value_ref if parent_ref is None else parent_ref)
 		if javascript_value.is_null_or_undefined(obj):
 			obj = {}
-		for key in keys:
+		keys = set(keys + list(obj.keys())) # combine object and prototype keys
+		#keys.discard("_class_") # hide these fields?
+		#keys.discard("_prototype_")
+		for key in list(keys):
 			v = value.valueForProperty_(key)
 			v = cls.jsvalue_to_py(v, value_ref if parent_ref is None else parent_ref)
-			obj[key] = v
+			if not javascript_value.is_undefined(v):
+				 # avoid setting undefined values as this can unset inherited values
+				obj[key] = v
 		return obj
 
 	@classmethod
@@ -1016,6 +1021,8 @@ class jscore:
 			return value # assume a void pointer is a value ref
 		if objc.ns_subclass_of(value, cls.JSValue):
 			return value.JSValueRef() # return refs from existing JSValues
+		if objc.ns_subclass_of(value, cls.JSScript):
+			raise Exception("JSScript")
 		# convert
 		if isinstance(value, bool):
 			return cls.JSValueMakeBoolean(context_ref, value)
@@ -1089,7 +1096,7 @@ class jscore:
 			return cls.JSValue.valueWithNullInContext_(context)
 		if javascript_value.is_undefined(value):
 			return cls.JSValue.valueWithUndefinedInContext_(context)
-		if objc.ns_subclass_of(value, jscore.JSValue):
+		if objc.ns_subclass_of(value, jscore.JSValue) or objc.ns_subclass_of(value, jscore.JSScript):
 			return value # pass back jsvalue instances as-is
 		if isinstance(value, bool):
 			return cls.JSValue.valueWithBool_inContext_(value, context)
@@ -1162,6 +1169,14 @@ class jscore:
 		if cls._initialised:
 			return
 		cls.prototype_register("Error", ["name", "message", "toString"])
+		cls.prototype_register("EvalError", ["name", "message", "toString"])
+		cls.prototype_register("RangeError", ["name", "message", "toString"])
+		cls.prototype_register("ReferenceError", ["name", "message", "toString"])
+		cls.prototype_register("SyntaxError", ["name", "message", "toString"])
+		cls.prototype_register("TypeError", ["name", "message", "toString"])
+		cls.prototype_register("URIError", ["name", "message", "toString"])
+		cls.prototype_register("AggregateError", ["name", "message", "toString"])
+		#cls.prototype_register("InternalError", ["name", "message", "toString"])
 		cls.prototype_register("Promise", ["then", "catch", "finally"])
 		cls._initialised = True
 
@@ -1284,7 +1299,8 @@ class javascript_function:
 				self.jsvalue.context().setException_(None)
 				raise Exception(str(exception))
 			return javascript_value(value)
-		
+		if self.jsvalue is not None and self.context_ref is None and self.value_ref is None:
+			self.context_ref, self.value_ref = jscore.jsvalue_get_refs(self.jsvalue)
 		if self.source is not None and self.value_ref is None:
 			if self.context_ref is not None:
 				self.compile()
@@ -1585,7 +1601,10 @@ class jscore_module_loader:
 		retain_global(self.delegate)
 		self.delegate._pyinstance = weakref.ref(self)
 		self.context.setModuleLoaderDelegate_(self.delegate)
-		self.evaluated = {}
+		self.resolved = []
+		self.failed = []
+		self.attempted = []
+		self.evaluated = []
 		
 	def release(self):
 		self.context.setModuleLoaderDelegate_(None)
@@ -1593,44 +1612,54 @@ class jscore_module_loader:
 		self.delegate = None
 		
 	def fetch_module(self, module, resolve, reject):
-		#print(module)
-		script = self.modules.get(module)
-		if script is None:
+		if module in self.evaluated:
+			reject()
+			return
+		script = None
+		try:
 			script = self.load_file(module, jscore.kJSScriptTypeModule)
+		except:
+			pass
 		if script is not None:
+			self.resolved.append(module)
 			resolve(script)
 		else:
+			self.failed.append(module)
 			reject()
 			
 	def will_eval_module(self, url):
-		print(f"will eval: {url}")
+		self.attempted.append(url)
 		pass
 		
 	def did_eval_module(self, url):
-		print(f"did eval: {url}")
+		self.evaluated.append(url)
 		pass
-
+		
+	def get_script(self, path):
+		path = self.runtime.get_file_path(path)
+		sourceUrl = self.runtime.get_source_url(None, path)
+		keys = [path, f"file://{path}", sourceUrl]
+		for key in keys:
+			module = self.modules.get(key)
+			if module is not None:
+				return module
+			script = self.scripts.get(key)
+			if script is not None:
+				return script
+		return None
+		
 	def load_script(self, script, scriptType, path, sourceUrl, source = None):
 		file_path = self.runtime.get_file_path(path)
-		path_no_ext = str(file_path.with_suffix(''))
 		lookup = self.modules if scriptType == jscore.kJSScriptTypeModule else self.scripts
 		if source is not None:
 			lookup[source] = script
 		lookup[path] = script
-		lookup[path_no_ext] = script
-		lookup[f"file://{path_no_ext}"] = script
+		lookup[f"file://{file_path}"] = script
 		lookup[sourceUrl] = script
 
 	def load_source(self, source, scriptType, modulePath = None):
 		lookup = self.modules if scriptType == jscore.kJSScriptTypeModule else self.scripts
-		script = lookup.get(source)
-		path = None
-		if script is None:
-			path = self.runtime.get_module_path(source, modulePath)
-			script = lookup.get(f"file://{path}")
-		if script is not None:
-			return script
-		script, sourceUrl, exception = self.runtime.load_source(source, scriptType, path)
+		script, sourceUrl, exception = self.runtime.load_source(source, scriptType, modulePath)
 		if exception is not None: 
 			 raise ImportError(exception)
 		self.load_script(script, scriptType, path, sourceUrl, source)
@@ -1638,14 +1667,7 @@ class jscore_module_loader:
 
 	def load_file(self, path, scriptType):
 		lookup = self.modules if scriptType == jscore.kJSScriptTypeModule else self.scripts
-		script = lookup.get(path)
-		if script is None:
-			path = self.runtime.get_file_path(path)
-			path = str(path)
-		script = lookup.get(path)
-		if script is not None:
-			return script
-		script, sourceUrl, exception = self.runtime.load_file(path, scriptType)
+		script, sourceUrl, exception = self.runtime.load_file(path, scriptType, sourceUrl=path)
 		if exception is not None: 
 			 raise ImportError(exception)
 		self.load_script(script, scriptType, path, sourceUrl)
@@ -1840,21 +1862,22 @@ class jscore_runtime:
 	def get_source_url(self, source, modulePath):
 		path = Path(self.get_module_path(source, modulePath))
 		path = str(path.relative_to(Path.cwd()))
-		return path
+		return f"file://./{path}"
 	
-	def load_source(self, source, scriptType = jscore.kJSScriptTypeProgram, modulePath = None):
+	def load_source(self, source, scriptType = jscore.kJSScriptTypeProgram, modulePath = None, sourceUrl = None):
 		loader = jscore.JSScript.scriptOfType_withSource_andSourceURL_andBytecodeCache_inVirtualMachine_error_
-		sourceUrl = self.get_source_url(source, modulePath)
+		if sourceUrl is None:
+			sourceUrl = self.get_source_url(source, modulePath)
 		return self.load_script(loader, source, scriptType, sourceUrl)
 	
-	def load_file(self, path, scriptType = jscore.kJSScriptTypeProgram):
+	def load_file(self, path, scriptType = jscore.kJSScriptTypeProgram, sourceUrl = None):
 		p = self.get_file_path(path)
-		sourceUrl = None
 		if not p.is_file() or not p.exists():
 			raise FileNotFoundError(f"Script file not found '{path}' ({p})")
 		path = str(p)
 		path = nsurl(path)
-		sourceUrl = self.get_source_url(None, p)
+		if sourceUrl is None:
+			sourceUrl = self.get_source_url(None, p)
 		loader = jscore.JSScript.scriptOfType_memoryMappedFromASCIIFile_withSourceURL_andBytecodeCache_inVirtualMachine_error_
 		return self.load_script(loader, path, scriptType, sourceUrl)
 		
@@ -2690,17 +2713,21 @@ if __name__ == '__main__':
 	});
 	""")
 	val = p.value.then(lambda v: print(v))
-
+	
 	header("Modules/scripts")
-	#context.eval_module_source("function module_source() { return 10; }", "sourcetest.js")
-	print("import",context.eval("import('sourcetext.js');").value.then(lambda *v: print(v)).catch(lambda e: print("error",e.toString())))
-	#print(context.js.module.then())
-	#context.eval_module_file("./test.js")
-	#print(context.js.filetest)
-	#str_ref = jscore.str_to_jsstringref("test test")
-	#print(str_ref)
-	#py_str = jscore.jsstringref_to_py(str_ref)
-	#print(py_str)
+	if Path("./test.js").exists():
+		context.js.print = lambda *v: print(*v)
+		context.eval("""
+		import('file://./test.js').then((x) => {
+			print('mod then');
+			print(x.filetest);
+			return x;
+			}).catch((e) => {
+				print('mod catch')
+				print(e.message)
+			});
+		""")
+
 	script_ref = runtime.load_script_ref(source="function script_ref(){ return 232; }; [1, '2', new Date(), script_ref, {'a':[]}];" , url="reftest.js")
 	value, exception = script_ref.eval(context)
 	print(value, exception, context.js.script_ref)
