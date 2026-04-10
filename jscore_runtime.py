@@ -574,6 +574,21 @@ class jscore:
 			
 	WTFStringPtr = POINTER(POINTER(WTFString))
 	
+	# representation of context CallbackData
+	class CallbackData(Structure):
+		pass
+	CallbackDataPtr = POINTER(CallbackData)
+	CallbackData._fields_ = [
+			("next", CallbackDataPtr),
+			("context", c_void_p),
+			("preservedException", c_void_p),
+			("calleeValue", c_void_p),
+			("thisValue", c_void_p),
+			("argumentCount", c_size_t),
+			("arguments", c_void_p),
+			("currentArguments", c_void_p)
+		]
+	
 	_runtime_vm = None
 	_runtime_context = None
 	_runtimes = {}
@@ -1339,6 +1354,13 @@ class javascript_function:
 			return self.source
 		if self.jsvalue is not None:
 			return str(self.jsvalue)
+			
+	def __invert__(self):
+		if self.jsvalue is not None:
+			return self.jsvalue
+		elif self.contect_ref and self.value_ref is not None:
+			return jscore.jsvalueref_to_jsvalue(self.context_ref, self.value_ref)
+		raise Exception("Compile function to access jsvalue")
 		
 	@classmethod
 	def from_source(cls, source, context = None, parent_ref = None):
@@ -1415,7 +1437,14 @@ class javascript_callback:
 		returnValue = self.callback(*callback_args)
 		returnJSValue_ref = jscore.py_to_jsvalueref(ctx, returnValue)
 		return returnJSValue_ref.value
-	
+		
+	def __invert__(self):
+		if self._jsvalue is not None:
+			return self.jsvalue
+		elif self.contect_ref and self.value_ref is not None:
+			return jscore.jsvalueref_to_jsvalue(self.context_ref, self.value_ref)
+		raise Exception("Compile function to access jsvalue")
+
 	_name_count = 0
 	@classmethod
 	def unique_name(cls):
@@ -1547,6 +1576,9 @@ class javascript_value:
 		
 	def __repr__(self):
 		return str(self.value)
+		
+	def __invert__(self):
+		return self.jsvalue
 
 
 class jsscript_ref:
@@ -1588,6 +1620,9 @@ class jsscript_ref:
 		value = jscore.jsvalueref_to_py(context_ref, value_ref)
 		exception = jscore.jsvalueref_to_py(context_ref, exception_ref)
 		return value, exception
+		
+	def __invert__(self):
+		return self.script_ref
 
 
 class jscore_module_loader:
@@ -1775,12 +1810,6 @@ class jscore_context:
 	def eval_file(self, path):
 		return self.eval_script_file(path, jscore.kJSScriptTypeProgram)
 	
-	def eval_module_source(self, source, modulePath = None):
-		return self.eval_script_source(source, jscore.kJSScriptTypeModule, modulePath)
-
-	def eval_module_file(self, path):
-		return self.eval_script_file(path, jscore.kJSScriptTypeModule)
-	
 	@property
 	def context_ref(self):
 		self.alloc()
@@ -1836,6 +1865,9 @@ class jscore_runtime:
 		if self.vm is None:
 			return
 		self.deallocate()
+		
+	def get_script(self, path):
+		pass
 	
 	def get_module_path(self, source = None, modulePath = None):
 		if source is not None:
@@ -2111,11 +2143,14 @@ class jsobject_accessor:
 
 	def __setitem__(self, key, value):
 		self.___set___(k, value)
-		
+
+	def __invert__(self):
+		return self.___jsobject___
+
 	@classmethod
 	def unwrap(cls, value):
 		if isinstance(value, cls):
-			return jscore.jsvalue_to_py(value.___jsobject___)
+			return jscore.jsvalue_to_py(~value)
 		return value
 
 
@@ -2179,7 +2214,9 @@ class javascript_context_accessor:
 		
 	def __setitem__(self, key, value):
 		return self.___set___(key, value)
-
+		
+	def __invert__(self):
+		return self.___globalObject___
 # concrete runtimes and contexts
 
 # javascript
