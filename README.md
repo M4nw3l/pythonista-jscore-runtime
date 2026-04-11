@@ -1,11 +1,14 @@
 # pythonista-jscore-runtime
 ## JSCore Runtime Framework - Execute JavaScript and WebAssembly in Pythonista 3 natively on iOS with JavaScriptCore.
-JSCore Runtime Framework is an experiment in pushing the boundaries of the Python environment and language features in the [Pythonista 3 IDE](https://omz-software.com/pythonista/) and apps developed with it on iOS. It is an extensive Python 3 mapping of the JavaScriptCore Objective-C and C-APIs via objc-util. Implementing closely analogous Python integrations, wrapping and interop for evaluating JavaScript and WebAssembly in independent and composable JavaScriptCore execution environments from Python 3 applications and scripts. Focused also from a point of view of being a serious attempt to extend vanilla Pythonista 3 to ultimately support Python packages and modules with compiled extensions that can be cross-compiled reliably into WebAssembly. 
+JSCore Runtime Framework is an experiment in pushing the boundaries of the Python environment and language features in the [Pythonista 3 IDE](https://omz-software.com/pythonista/) and apps developed with it on iOS. 
+It is an extensive Python 3 mapping of the JavaScriptCore Objective-C and C-APIs via objc-util. Implementing closely analogous Python integrations, wrapping and interop for evaluating JavaScript and WebAssembly in the JavaScriptCore execution environment from Python 3 applications and scripts. Focused also from a point of view of being a serious attempt to extend vanilla Pythonista 3 to ultimately support Python packages and modules with compiled extensions that can be cross-compiled reliably into WebAssembly. 
 
 The projects overall long term goals aim to offer three core capabilities/features:
 - Evaluate/execute JavaScript and WebAssembly with seamless Python interop as a standalone library for Pythonista 3 based Python 3 apps.
 - Compile, bundle, import and run custom source code and third party components extensibly with WebAssembly and JavaScript.
 - Support Python packages/modules with extensions which can be cross-compiled to WebAssmembly from languages such as C.
+
+Currently, execution of both JavaScript and WebAssembly interoperating with Python is now thereabouts fully supported, with a mostly complete and pythonic wrapping API to interact with JavaScriptCore execution contexts/environments. The interface is close to stable, especially from a JavaScript perspective but is still evolving somewhat. The WebAssembly runtime is more experimental still and therefore likely to be subject to change.
 
 A few (very) simple examples:
 
@@ -36,7 +39,7 @@ module.exports.exported_func()
 
 # output:
 # 42
-# (written to Pythonistas terminal via imported_func)
+# (written to Pythonista's terminal via imported_func)
 ```
 
 ## Installation
@@ -114,7 +117,7 @@ print(js_context.js.hello)
 
 ```
 
-They use the same runtime instances returned by `jscore.runtime` sharing the same underlying `JSVirtualMachine` and a single `JSContext` instance between them. The `javascript_context` and `wasm_context` objects returned by `javascript_runtime` and `wasm_runtime` instances craated by `jscore.runtime` respectively, are also sharing these same instances. Although separated runtime environments are also possible to create, they are not necessary for a standard use case. JavaScriptCore's API allows construction of context groupings but note there are some additonal considerations for working with data / memory between them. For example attempting to pass a `JSValue` to a context that didn't create is undefined behaviour and will most likey cause a crash.
+They use the same runtime instances returned by `jscore.runtime` sharing the same underlying `JSVirtualMachine` and a single `JSContext` instance between them. The `javascript_context` and `wasm_context` objects returned by `javascript_runtime` and `wasm_runtime` instances craated by `jscore.runtime` respectively, are also sharing these same instances. Although separated runtime environments are also possible to create, they are not necessary for a standard use case. JavaScriptCore's API allows construction of context groupings but note there are some additonal considerations for working with data / memory between them. For example, attempting to pass a `JSValue` to a context that didn't create it, is undefined behaviour and will most likey cause a crash.
 
 Additionally `wasm_runtime` and `wasm_context` track only their own instances that have been created from Python. WebAssembly instance instantiated through JavaScript evaluation may still be accessed however when passed to Python or if they are made accessible from the global scope. 
 
@@ -261,7 +264,6 @@ An end to end example of loading and using a WebAssembly module from Pythonista 
 
 - Firstly, download the [simple.wasm](https://raw.githubusercontent.com/mdn/webassembly-examples/master/js-api-examples/simple.wasm) module from the page. 
 - After downloading simple.wasm, the next step is to copy this into Pythonista. To do this, navigate to the simple.wasm file in your Files app, then select the file and open the sharing sheet, then tap "Run Pythonista Script" and then choose the "Import File" option. 
-	- **Note: This is the only safe way to import .wasm files into Pythonista. The import function from in the Pythonista app itself does not support .wasm files and must not be used to import binary!**
 - Create a folder for your project and copy simple.wasm inside.
 - In your folder with the simple.wasm module create the following script:
 
@@ -280,7 +282,10 @@ with (jscore.runtime(wasm_runtime) as runtime, runtime.context() as context):
 	
 # output: 42
 ```
-Modules loading has been made to closely align with javascript with a couple of notable differences, firstly Python functions/callables may be used as imports as well as javascript functions. A fixed imports table is defined per `wasm_module` and `wasm_context`, imports must therefore be specified via the `wasm_module.imports` module specific imports or `wasm_context.imports` context-wide imports properties. A modules imports always override context-wide imports. 
+**Important Note:** "Run Pythonista Script->Import File" is the only safe way to import .wasm files into Pythonista besides a custom script. As the import function from the Pythonista app's menu ui does not appear to support .wasm files or binary in general. In fact it seems to even attempt to convert the data to text, by replacing unprintable characters with '?' rather than leaving it as-is, if the restriction is bypassed with an acceptable file extension. So therefore it **must not** be used to import binary files, nor the editor used to edit or even view them due to the editors autosaving functionality! Its easy to avoid this with some care double checking filenames before choosing the "Edit as text" option. Use only hex editors or disassemblers/assemblers packages to view / edit assemblies as binary.
+
+
+Modules loading has been made to closely align with javascript with a couple of notable differences, firstly Python functions/callables may be used as imports as well as javascript functions. A fixed imports table is defined per `wasm_module` and `wasm_context`, imports must therefore be specified via the `wasm_module.imports`, module specific imports property, or `wasm_context.imports` context-wide imports property. A modules imports namespace always overrides any context-wide imports of the same matching structure and keys. 
 
 ## Known issues
 - Loading javascript files from remote sources / cdns etc is not implemented (yet).
