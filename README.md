@@ -1,13 +1,13 @@
 # pythonista-jscore-runtime
 ## JSCore Runtime Framework - Execute JavaScript and WebAssembly in Pythonista 3 natively on iOS with JavaScriptCore.
-JSCore Runtime Framework is an experiment in pushing the boundaries of the Python environment and language features in the Pythonista 3 IDE and apps developed with it on iOS. It is an extensive Python 3 mapping of the JavaScriptCore Objective-C and C-APIs via objc-util. Implementing closely analogous Python integrations, wrapping and interop for evaluating JavaScript and WebAssembly in independent and composable JavaScriptCore execution environments from Python 3 applications and scripts. Focused also from a point of view of being a serious attempt to extend vanilla Pythonista 3 to ultimately support Python packages and modules with compiled extensions that can be cross-compiled reliably into WebAssembly. 
+JSCore Runtime Framework is an experiment in pushing the boundaries of the Python environment and language features in the [Pythonista 3 IDE](https://omz-software.com/pythonista/) and apps developed with it on iOS. It is an extensive Python 3 mapping of the JavaScriptCore Objective-C and C-APIs via objc-util. Implementing closely analogous Python integrations, wrapping and interop for evaluating JavaScript and WebAssembly in independent and composable JavaScriptCore execution environments from Python 3 applications and scripts. Focused also from a point of view of being a serious attempt to extend vanilla Pythonista 3 to ultimately support Python packages and modules with compiled extensions that can be cross-compiled reliably into WebAssembly. 
 
 The projects overall long term goals aim to offer three core capabilities/features:
 - Evaluate/execute JavaScript and WebAssembly with seamless Python interop as a standalone library for Pythonista 3 based Python 3 apps.
 - Compile, bundle, import and run custom source code and third party components extensibly with WebAssembly and JavaScript.
 - Support Python packages/modules with extensions which can be cross-compiled to WebAssmembly from languages such as C.
 
-A (very) simple example:
+A few (very) simple examples:
 
 ```python
 
@@ -20,10 +20,23 @@ print(context.js.hello_world())
 context.js.value_from_python = ["hello", "from", "python", 1, 2.2, 3.333333, {"object":"value", "nested":{"obj":["array", [], {}]}}]
 print(context.eval('value_from_python[2] = "javascript"; value_from_python;').value)
 
+context.js.call_python = lambda v: print(f"hello from python {v}!")
+context.eval('call_python("called from javascript");')
 # output: 
 # hello world
 # ['hello', 'from', 'javascript', 1, 2.2, 3.333333, {'object': 'value', 'nested': {'obj': ['array', [], {}]}}]
+# hello from python called from javascript!
 
+context = jscore.webassembly()
+# based on https://developer.mozilla.org/en-US/docs/WebAssembly/Guides/Using_the_JavaScript_API#loading_wasm_modules_in_javascript
+module = wasm_module.from_file('./simple.wasm')
+module.imports.my_namespace.imported_func = lambda *v: print(*v)
+context.load_module(module)
+module.exports.exported_func() 
+
+# output:
+# 42
+# (written to Pythonistas terminal via imported_func)
 ```
 
 ## Installation
