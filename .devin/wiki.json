@@ -1,0 +1,164 @@
+{
+  "repo_notes": [
+    {
+      "content": "Execute JavaScript and WebAssembly in Pythonista 3 natively on iOS with JavaScriptCore."
+    }
+  ],
+  "pages": [
+    {
+      "title": "Overview",
+      "purpose": "High-level introduction to pythonista-jscore-runtime: what it is, why it exists, its goals, current status, and how to install it. Links to child pages for architecture and usage details.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Getting Started",
+      "purpose": "Step-by-step guide for installing the library in Pythonista 3 via StaSh/pip or manual file copy, environment prerequisites (iOS, Python 3.10+, objc_util), and a minimal working example for both JavaScript and WebAssembly execution.",
+      "parent": "Overview",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Project Structure and Packaging",
+      "purpose": "Describes the repository layout (single-module design), the flit-based build system, pyproject.toml metadata, dynamic versioning, and the MIT license terms.",
+      "parent": "Overview",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Architecture",
+      "purpose": "Overview of the layered architecture: Objective-C runtime bridge, JavaScriptCore C API bindings, type marshalling, runtime/context lifecycle, and module loading. Links to child pages for each major subsystem.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Objective-C Runtime Bridge",
+      "purpose": "Deep dive into the `objc` helper class: how ctypes is used to load libJavaScriptCore.dylib, how Objective-C type encodings are constructed via `get_type_encoding`, how dynamic protocols are allocated and registered at runtime (e.g., `JSModuleLoaderDelegate`), and how NSObject subclass checks and NS-to-Python conversions work.",
+      "parent": "Architecture",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "JavaScriptCore C API Bindings",
+      "purpose": "Documents the `jscore` class as the low-level API layer extensively: all bound C functions (JSContext*, JSString*, JSValue*, JSObject*, JSTypedArray*), the ObjC class references (JSVirtualMachine, JSContext, JSValue, JSScript, JSManagedValue), and how `objc.c_func` is used to declare ctypes signatures for each API call.",
+      "parent": "Architecture",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Type Marshalling: Python ↔ JavaScript",
+      "purpose": "Explains the bidirectional type conversion pipeline: `py_to_jsvalue` (Python→JS) covering primitives, lists, dicts, callables, and dates; `jsvalue_to_py` (JS→Python) covering strings, numbers, booleans, dates, arrays, and objects. Covers `javascript_object`, `javascript_undefined_value`, `javascript_value`, and `jsvalue_accessor` wrapper classes.",
+      "parent": "Architecture",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Runtime and Context Lifecycle",
+      "purpose": "Covers the `jscore_runtime` and `jscore_context` class hierarchy, the singleton management pattern in the `jscore` static class (`jscore.runtime()`, `jscore.js()`, `jscore.wasm()`), JSVirtualMachine ownership and cleanup, context manager (`with` statement) support, and the relationship between runtimes and contexts.",
+      "parent": "Architecture",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "JavaScript Runtime",
+      "purpose": "Overview of the JavaScript execution subsystem, linking to child pages covering the context API, the global object accessor, callbacks, and the module loader.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Evaluating JavaScript",
+      "purpose": "Documents `javascript_context.eval()`, `eval_source()`, and `eval_file()` methods; the `javascript_eval_result` return type (value + exception keys); error handling; and the `JSScript` and `jsscript_ref` javascript source code and source files pre-compilation paths.",
+      "parent": "JavaScript Runtime",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "The `context.js` Global Accessor",
+      "purpose": "Explains the `javascript_context_accessor` proxy: how `__getattr__` and `__setattr__` map Python attribute access to JS global scope reads/writes, how Python callables are automatically wrapped into `javascript_callback` instances, how `javascript_function.from_source()` creates JS-defined functions callable from Python, and the rules around JS access semantics (e.g., const assignment failures).",
+      "parent": "JavaScript Runtime",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Module Loader and ES6 Imports",
+      "purpose": "Details the `jscore_module_loader` class implementing `JSModuleLoaderDelegate`: how it intercepts JS `import` statements, resolves identifiers to local files, creates `JSScript` objects of type `kJSScriptTypeModule`, caches scripts and modules in internal dicts, and passes resolved modules to the JS `resolve` handler. Covers known limitations (no remote CDN loading).",
+      "parent": "JavaScript Runtime",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "WebAssembly Runtime",
+      "purpose": "In depth overview of the WebAssembly subsystem: `wasm_runtime`, `wasm_context`, `wasm_module`, and `wasm_namespace`. Links to child pages for module loading and the import/export system.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Loading WebAssembly Modules",
+      "purpose": "Covers `wasm_module` construction (from file path, raw bytes, or integer list), WASM magic header validation (`b'\\0asm\\1\\0\\0\\0'`), the `wasm_context.load_module()` pipeline, the injected `_jscore_wasm_load` JavaScript helper function, direct NSData-to-Uint8Array buffer copy for binary integrity, and how loaded modules are tracked in `_jscore_wasm_modules` to prevent GC. Includes the iOS-specific file import warning.",
+      "parent": "WebAssembly Runtime",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Imports, Exports, and the `wasm_namespace` Proxy",
+      "purpose": "Explains the `wasm_namespace` recursive proxy object used to define nested import structures (e.g., `module.imports.env.memory`), how Python callables and `javascript_function` instances are accepted as imports, how `wasm_context.imports` provides context-wide defaults overridden by module-specific imports, how `ImportError` is raised for missing required imports, and how exported WASM functions are exposed as callable `javascript_function` instances via `module.exports`.",
+      "parent": "WebAssembly Runtime",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Glossary",
+      "purpose": "Definitions of all codebase-specific terms, Objective-C/iOS concepts, JavaScriptCore API names, and internal class names that an onboarding engineer needs to understand. Each entry includes file and line references.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    }
+  ]
+}

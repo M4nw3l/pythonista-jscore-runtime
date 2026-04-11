@@ -53,6 +53,8 @@ pip install pythonista-jscore-runtime
 Or download [jscore_runtime.py](jscore_runtime.py) from the repository and copy to your site-packages folder.
 
 ## Usage
+[DeepWiki Documentation](https://deepwiki.com/M4nw3l/pythonista-jscore-runtime)
+
 ### Javascript Runtime
 JSCore Runtime supports both the context management and explicit create/destroy usage paradigms. 
 It provides singletons for convenience evaluation and while also allows more explicit management of multiple virtual machines and contexts with its class model.
