@@ -76,20 +76,47 @@ A context may evaluate javascript with several javascript evaluation function va
 # general purpose javascript string evaluation function
 context.eval(jsSourceCode) 
 # returns:
-# eval_result {"value": [python js value representation] or None , "exception": exception string or None }
+# javascript_eval_result {"value": [python js value representation] or None , "exception": exception string or None }
 
 # module loader based javascript evaluation functions
-# regular javascript scripts/programs loaded synchronously
-context.eval_source(jsSourceCode)
+context.eval_source(jsSourceCode, sourceUrl="./virtual_path/to/file")
 context.eval_file(".path/to/js-file.js")
 
-# javascript modules loaded asynchronously
-context.eval_module_source(moduleSourceCode, './optional/path/to/virtal-name.js')
-context.eval_module_file("./path/to/module/index.js")
-
 # all return:
-# eval_result {"value": [python js value representation] or None , "exception": exception string or None }
+# javascript_eval_result {"value": [python js value representation] or None , "exception": exception string or None }
 ```
+
+### Shared context singleton convenience accessors
+As the most typical standard use case is being able to just load and execute some arbitrary JavaScript source code or pre-compiled Web Assembly from Python, that also may interact with one another. A set of convenience accessors to obtain contexts with a shared global scope are provided from the `jscore` static class. They come in both long-form and short-hand variants. 
+
+```python
+from jscore_runtime import *
+
+js_context = jscore.javascript()
+
+# short-hand
+js_context = jscore.js()
+
+js_context.js.hello = "javascript"
+
+wasm_context = jscore.webassembly()
+# short-hand
+wasm_context = jscore.wasm()
+
+# all variables in the contexts global scopes are shared
+print(wasm_context.js.hello)
+# prints javascript
+
+wasm_context.js.hello = "wasm"
+
+print(js_context.js.hello)
+# prints wasm
+
+```
+
+They use the same runtime instances returned by `jscore.runtime` sharing the same underlying `JSVirtualMachine` and a single `JSContext` instance between them. The `javascript_context` and `wasm_context` objects returned by `javascript_runtime` and `wasm_runtime` instances craated by `jscore.runtime` respectively, are also sharing these same instances. Although separated runtime environments are also possible to create, they are not necessary for a standard use case. JavaScriptCore's API allows construction of context groupings but note there are some additonal considerations for working with data / memory between them. For example attempting to pass a `JSValue` to a context that didn't create is undefined behaviour and will most likey cause a crash.
+
+Additionally `wasm_runtime` and `wasm_context` track only their own instances that have been created from Python. WebAssembly instance instantiated through JavaScript evaluation may still be accessed however when passed to Python or if they are made accessible from the global scope. 
 
 ### context.js accessor
 A `javascript_context` provides a `js` property which allows access to the javascript contexts global object in a 'python-esque' interface.
@@ -126,6 +153,7 @@ context.eval('python_print(python_val());')
 ```
 
 A function may also be created with javascript source:
+
 ```python
 context.js.my_function = javascript_function.from_source('function() { return 1234; }')
 ```
@@ -141,6 +169,7 @@ with files and byte arrays from Python. They efficiently load WebAssembly module
 To create a `wasm_context` a `wasm_runtime` instance needs to be created first. This currently works the same way as the `javascript_runtime`. 
 
 A singleton runtime instance, with a lifetime of the program, may be obtained from the `jscore.runtime` accessor.
+
 ```python
 runtime = jscore.runtime(wasm_runtime)
 ```
