@@ -1548,13 +1548,16 @@ class javascript_value:
 		self._value_ref = value_ref
 		self._val = None
 		self._cached = False
-		self._keys = None
 	
 	@property
 	def jsvalue(self):
 		if self._jsvalue is not None:
 			return self._jsvalue
-		self._jsvalue = jscore.jsvalueref_to_jsvalue(self._context_ref, self._value_ref)
+		if self._context_ref is not None and self._value_ref is not None:
+			self._jsvalue = jscore.jsvalueref_to_jsvalue(self._context_ref, self._value_ref)
+		else:
+			raise ValueError("Invalid javascript_value, JSValue and refs are null")
+		return self._jsvalue
 		
 	@property
 	def jsobject(self):
@@ -1766,23 +1769,25 @@ class jscore_context:
 			self.destroy()
 		return self
 		
-	class eval_result:
-		def __init__(self, wrapper, exception):
-			self.wrapper = wrapper
-			self.jsvalue = wrapper.jsvalue
-			self.exception = exception
+	def __invert__(self):
+		return self.context
+		
+	class javascript_eval_result(javascript_value):
+		def __init__(self, jsvalue, exception):
+			super().__init__(jsvalue)
+			self._exception = exception
 		
 		@property
-		def value(self):
-			return self.wrapper.value
+		def exception(self):
+			return self._exception
 			
 		def __repr__(self):
-			return str({"value":self.value, "exception":self.exception})
+			return str({"value":self.value, "exception": self.exception})
 	
 	def eval(self, script, sourceUrl=None):
 		self.alloc()
 		result, ex = jscore.context_eval(self.context, script, sourceUrl)
-		result = self.eval_result(javascript_value(result), ex)
+		result = self.javascript_eval_result(result, ex)
 		return result
 	
 	def eval_jsscript(self, jsscript):
@@ -1793,7 +1798,7 @@ class jscore_context:
 		ex = self.context.exception()
 		if ex is not None:
 			self.context.setException(None) # clear exception if set
-		result = self.eval_result(javascript_value(result), ex)
+		result = self.javascript_eval_result(result, ex)
 		return result
 	
 	def eval_script_source(self, source, scriptType = jscore.kJSScriptTypeProgram, modulePath = None):
@@ -1865,10 +1870,7 @@ class jscore_runtime:
 		if self.vm is None:
 			return
 		self.deallocate()
-		
-	def get_script(self, path):
-		pass
-	
+
 	def get_module_path(self, source = None, modulePath = None):
 		if source is not None:
 			path = self.module_paths.get(source)
@@ -1956,6 +1958,9 @@ class jscore_runtime:
 		if self.depth == 0:
 			self.destroy()
 		return self
+		
+	def __invert__(self):
+		return self.vm
 
 	def new_context(self, context):
 		raise NotImplementedError() 
@@ -2760,10 +2765,10 @@ if __name__ == '__main__':
 			print(x.filetest);
 			return x;
 			}).catch((e) => {
-				print('mod catch')
-				print(e.message)
+				print('mod catch');
+				print(e.message);
 			});
-		""")
+		""").value.then(lambda *v: print("loaded"))
 
 	script_ref = runtime.load_script_ref(source="function script_ref(){ return 232; }; [1, '2', new Date(), script_ref, {'a':[]}];" , url="reftest.js")
 	value, exception = script_ref.eval(context)
