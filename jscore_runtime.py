@@ -2434,16 +2434,16 @@ class wasm_context(jscore_context):
 		
 	def allocate(self):
 		super().allocate()
-		self._load_module = self.eval("""
+		self._load_module = self.eval("""(function() {
 		const _jscore_wasm_modules = {}
-		function _jscore_wasm_load(name, wasm_bin, namespace){
+		return function _jscore_wasm_load(name, wasm_bin, namespace){
 				if(namespace === null) { namespace = {}; }
 				const wasm_module = new WebAssembly.Module(wasm_bin);
 				const wasm_instance = new WebAssembly.Instance(wasm_module, namespace);
 				const wasm_module_instance = {"instance": wasm_instance, "namespace": namespace, "module": wasm_module};
 				_jscore_wasm_modules[name] = wasm_module_instance; // ensure module remains in scope
 				return wasm_module_instance;
-		};_jscore_wasm_load;""").value
+		};})();""").value
 		
 	def deallocate(self):
 		for name,module in self._modules.items():
