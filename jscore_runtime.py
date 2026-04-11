@@ -807,6 +807,13 @@ class jscore:
 		str_utf16 = objc.c_array(str_py.encode("utf-16le"))
 		str_ref = jscore.JSStringCreateWithCharacters(str_utf16, str_len)
 		return cast(cls.JSStringRetain(str_ref), c_void_p)
+		
+	@classmethod
+	def jsstringref_release(cls, str_ref):
+		if str_ref is None or not isinstance(str_ref, c_void_p):
+			raise ValueError("Invalid str_ref")
+		cls.JSStringRelease(str_ref)
+		return None
 
 	@classmethod
 	def jsscript_source_to_str(cls, script):
@@ -971,26 +978,32 @@ class jscore:
 			if str_ref:
 				source = cls.jsstringref_to_py(str_ref)
 			return javascript_function(None, context_ref, value_ref, parent_ref, source)
-		names_ref = cls.JSObjectCopyPropertyNames(context_ref, value_ref)
-		count = cls.JSPropertyNameArrayGetCount(names_ref)
+
 		obj = None
 		if cls.JSValueIsArray(context_ref, value_ref):
+			names_ref = cls.JSObjectCopyPropertyNames(context_ref, value_ref)
+			count = cls.JSPropertyNameArrayGetCount(names_ref)
 			obj = []
 			for i in range(count):
 				key_ref = cls.JSPropertyNameArrayGetNameAtIndex(names_ref, i)
 				jsvalue_ref = cls.JSObjectGetProperty(context_ref, value_ref, key_ref, byref(ex))
 				obj.append(cls.jsvalueref_to_py(context_ref, jsvalue_ref, value_ref))
+			cls.JSPropertyNameArrayRelease(names_ref)
 		else:
 			prototype_ref = cls.jsvalueref_get_prototype(context_ref, value_ref)
 			obj = cls.jsvalueref_to_py(context_ref, prototype_ref, value_ref if parent_ref is None else parent_ref)
 			if javascript_value.is_null_or_undefined(obj):
 				obj = {}
-			for i in range(count):
-				key_ref = cls.JSPropertyNameArrayGetNameAtIndex(names_ref, i)
+			keys = cls.jsobjectref_keys(context_ref, value_ref)
+			keys = list(set(keys+list(obj.keys())))
+			for key in keys:
+				key_ref = cls.str_to_jsstringref(key)
 				jsvalue_ref = cls.JSObjectGetProperty(context_ref, value_ref, key_ref, byref(ex))
 				key = cls.jsstringref_to_py(key_ref)
-				obj[key] = cls.jsvalueref_to_py(context_ref, jsvalue_ref, value_ref)
-		cls.JSPropertyNameArrayRelease(names_ref)
+				cls.jsstringref_release(key_ref)
+				value = cls.jsvalueref_to_py(context_ref, jsvalue_ref, value_ref)
+				if not javascript_value.is_undefined(value):
+					obj[key] = value
 		return obj
 	
 	@classmethod
@@ -1097,6 +1110,7 @@ class jscore:
 			key_ref = cls.str_to_jsstringref(k)
 			val_ref = cls.py_to_jsvalueref(context_ref, v, value_ref)
 			cls.JSObjectSetProperty(context_ref, value_ref, key_ref, val_ref, 0, byref(ex_ref))
+			cls.jsstringref_release(key_ref)
 		return value_ref
 		
 	@classmethod
@@ -1276,6 +1290,10 @@ class javascript_function:
 		body_ref = jscore.str_to_jsstringref(body)
 		ex_ref = c_void_p(None)
 		self.value_ref = jscore.JSObjectMakeFunction(context_ref, name_ref, params_count, params_refs, body_ref, None, 0, by_ref(ex_ref))
+		jscore.jsstringref_release(name_ref)
+		jscore.jsstringref_release(body_ref)
+		for param_ref in params_refs:
+			jscore.jsstringref_release(param_ref)
 		self.context_ref = context_ref
 		if ex_ref.value is not None:
 			exception = jscore.jsvalueref_to_py(context_ref, ex_ref)
@@ -1403,6 +1421,7 @@ class javascript_callback:
 			parent_ref = jscore.JSContextGetGlobalObject(self.context_ref)
 		ex = c_void_p(None)
 		jscore.JSObjectSetProperty(self.context_ref, parent_ref, name_ref, value_ref, 0, byref(ex))
+		jscore.jsstringref_release(name_ref)
 	
 	def get_jsvalue_ref(self, context_ref, parent_ref = None):
 		if self.context_ref is not None and self.context_ref != context_ref:
@@ -1606,8 +1625,8 @@ class jsscript_ref:
 		if self.runtime.vm is not None:
 			raise Exception("VM must be released before releasing scripts")
 		jscore.JSScriptRelease(self.script_ref) # must outlive VM
-		jscore.JSStringRelease(self.source_ref)
-		jscore.JSStringRelease(self.url_ref)
+		jscore.jsstringref_release(self.source_ref)
+		jscore.jsstringref_release(self.url_ref)
 		
 	def eval(self, context):
 		context = context.context
