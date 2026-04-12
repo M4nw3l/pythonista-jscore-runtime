@@ -171,8 +171,8 @@ class objc:
 			name = f"{basename}_{counter}"
 			counter = counter + 1
 		p = objc.allocateProtocol(name)
-		for id in protocols:
-			parent = objc.getProtocol("NSObject")
+		for pid in protocols:
+			parent = objc.getProtocol(pid)
 			if parent is None:
 				 raise ValueError(f"Protocol not found '{id}'")
 			objc.protocol_addProtocol(p, parent)
