@@ -26,24 +26,24 @@ class objc:
 	#https://github.com/beeware/rubicon-objc/blob/1a97f483fdd83f4fc31050ee863535e3ed962944/src/rubicon/objc/runtime.py#L77
 	_lib_path = ["/usr/lib"]
 	_framework_path = ["/System/Library/Frameworks"]
-	@staticmethod
-	def load_library(name):
+	@classmethod
+	def load_library(cls, name):
 		path = find_library(name)
 		if path is not None:
 			return CDLL(path)
 
-		for loc in _lib_path:
+		for loc in cls._lib_path:
 			try:
 				return CDLL(os.path.join(loc, "lib" + name + ".dylib"))
 			except OSError:
 				pass
 
-		for loc in _framework_path:
+		for loc in cls._framework_path:
 			try:
 				return CDLL(os.path.join(loc, name + ".framework", name))
 			except OSError:
 				pass
-		raise ValueError(f"Library {name!r} not found")
+		raise ImportError(f"Library {name} not found")
 	
 	@staticmethod
 	def const(dll, name, typ = c_void_p):
@@ -195,7 +195,7 @@ class objc:
 				required = False
 			elif not ":" in method:
 				objc.protocol_addProperty(p, method, required, methodTypes) # TODO: properties
-				print(method)
+				#print(method)
 			else:
 				objc.protocol_addMethodDescription(p, method, required, methodTypes)
 		objc.objc_registerProtocol(p)
@@ -1254,7 +1254,7 @@ class javascript_undefined_value:
 class javascript_symbol:
 	def __init__(self, symbol):
 		self.symbol = symbol
-		print(f"javascript_symbol {symbol}")
+		#print(f"javascript_symbol {symbol}")
 
 
 class javascript_function:
@@ -1461,7 +1461,7 @@ class javascript_callback:
 		
 	def __invert__(self):
 		if self._jsvalue is not None:
-			return self.jsvalue
+			return self._jsvalue
 		elif self.context_ref and self.value_ref is not None:
 			return jscore.jsvalueref_to_jsvalue(self.context_ref, self.value_ref)
 		raise Exception("Compile function to access jsvalue")
@@ -1563,7 +1563,7 @@ class javascript_value:
 
 	def __init__(self, jsvalue = None, context_ref = None, value_ref = None):
 		if jsvalue is None and context_ref is None and value_ref is None:
-			raise ArgumentError("Either jsvalue or context_ref and value_ref must be specified")
+			raise ValueError("Either jsvalue or context_ref and value_ref must be specified")
 		self._jsvalue = jsvalue
 		self._context_ref = context_ref
 		self._value_ref = value_ref
@@ -1721,7 +1721,7 @@ class jscore_module_loader:
 		script, sourceUrl, exception = self.runtime.load_source(source, scriptType, modulePath)
 		if exception is not None: 
 			 raise ImportError(exception)
-		self.load_script(script, scriptType, path, sourceUrl, source)
+		self.load_script(script, scriptType, sourceUrl, sourceUrl, source)
 		return script
 
 	def load_file(self, path, scriptType):
@@ -1893,6 +1893,7 @@ class jscore_runtime:
 		self.deallocate()
 
 	def get_module_path(self, source = None, modulePath = None):
+		path = None
 		if source is not None:
 			path = self.module_paths.get(source)
 			if path is not None:
@@ -2123,7 +2124,7 @@ class jsobject_accessor:
 		key = str(key)
 		if not self.___jsobject___.hasProperty_(key):
 			return javascript_value.undefined
-		value = self.___jsobject___.valueForProperty(key)
+		value = self.___jsobject___.valueForProperty_(key)
 		if jscore.jsvalue_is_object(value):
 			path = key
 			if self.___jsobject___.isArray():
@@ -2193,7 +2194,7 @@ class javascript_context_accessor:
 		if not isinstance(key, str):
 			return value
 		if self.___globalObject___.hasProperty_(key):
-			value = self.___globalObject___.valueForProperty(key)
+			value = self.___globalObject___.valueForProperty_(key)
 		else:
 			result = self.___context___.eval(f'{key};')
 			value = result.jsvalue
@@ -2212,7 +2213,7 @@ class javascript_context_accessor:
 				evaluator.set_self(value, current)
 				return
 		else:
-			jsvalue = self.___globalObject___.valueForProperty(key)
+			jsvalue = self.___globalObject___.valueForProperty_(key)
 		current = javascript_value.undefined
 		if jsvalue is not None:
 			current = jscore.jsvalue_to_py(jsvalue)
@@ -2342,12 +2343,12 @@ class wasm_module:
 			self.data = []
 			data = bytes(data)
 			if not wasm_module.has_header(data):
-				raise ArgumentError(f"Invalid wasm module. Modules must start with '{wasm_module.header}'.")
+				raise ImportError(f"Invalid wasm module. Modules must start with '{wasm_module.header}'.")
 			self.data.append(data)
 		elif isinstance(data, str) or isinstance(data, Path):
 			self.nsdata = objc.nsdata_from_file(data)
 		elif data is not None:
-			raise ArgumentError("Unknown module data type "+type(data))
+			raise ImportError("Unknown module data type "+type(data))
 		else:
 			self.data = []
 
