@@ -289,6 +289,7 @@ with (jscore.runtime(wasm_runtime) as runtime, runtime.context() as context):
 Modules loading has been made to closely align with javascript with a couple of notable differences, firstly Python functions/callables may be used as imports as well as javascript functions. A fixed imports table is defined per `wasm_module` and `wasm_context`, imports must therefore be specified via the `wasm_module.imports`, module specific imports property, or `wasm_context.imports` context-wide imports property. A modules imports namespace always overrides any context-wide imports of the same matching structure and keys. 
 
 [DeepWiki Documentation](https://deepwiki.com/M4nw3l/pythonista-jscore-runtime)
+
 Disclaimer: DeepWiki documentation is AI generated, some inaccuracies or incorrect details are present and should be expected, if in doubt always reference the code. 
 Further content with more agent guidance and wrangling to attempt to improve this documentations accuracy will be added on-going.
 
