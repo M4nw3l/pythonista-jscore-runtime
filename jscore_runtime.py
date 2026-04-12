@@ -16,7 +16,6 @@ from datetime import (datetime, timezone)
 import json, re
 from pathlib import Path
 import tempfile, shutil, os
-import ui
 
 NSDate = ObjCClass("NSDate")
 NSFileManager = ObjCClass("NSFileManager")
@@ -1278,18 +1277,21 @@ class javascript_function:
 		fn_name = name_match.group(0).strip()
 		params_match = re.match("function[^\(]*\(([^\)]*)\)", self.source)
 		params = params_match.group(0).split(",")
+		params_count = 0
 		params_refs = []
 		for p in params:
 			param = p.strip()
 			if param != "":
 				param_ref = jscore.str_to_jsstringref(param)
 				params_refs.append(param_ref)
-		params_refs = objc.c_array(params_refs)
+				params_count += 1
+		params_refs = objc.c_array(params_refs, typ = c_void_p)
 		name_ref = jscore.str_to_jsstringref(fn_name)
+		body = self.source
 		body = body[body.index('{'):body.rindex('}')]
 		body_ref = jscore.str_to_jsstringref(body)
 		ex_ref = c_void_p(None)
-		self.value_ref = jscore.JSObjectMakeFunction(context_ref, name_ref, params_count, params_refs, body_ref, None, 0, by_ref(ex_ref))
+		self.value_ref = jscore.JSObjectMakeFunction(context_ref, name_ref, params_count, params_refs, body_ref, None, 0, byref(ex_ref))
 		jscore.jsstringref_release(name_ref)
 		jscore.jsstringref_release(body_ref)
 		for param_ref in params_refs:
@@ -1297,7 +1299,7 @@ class javascript_function:
 		self.context_ref = context_ref
 		if ex_ref.value is not None:
 			exception = jscore.jsvalueref_to_py(context_ref, ex_ref)
-			raise ImportError("Exception compiling function: {exception}")
+			raise ImportError(f"Exception compiling function: {exception}")
 		return self.value_ref
 	
 	def ns_arg(self, context, arg):
@@ -1376,7 +1378,7 @@ class javascript_function:
 	def __invert__(self):
 		if self.jsvalue is not None:
 			return self.jsvalue
-		elif self.contect_ref and self.value_ref is not None:
+		elif self.context_ref and self.value_ref is not None:
 			return jscore.jsvalueref_to_jsvalue(self.context_ref, self.value_ref)
 		raise Exception("Compile function to access jsvalue")
 		
@@ -1460,7 +1462,7 @@ class javascript_callback:
 	def __invert__(self):
 		if self._jsvalue is not None:
 			return self.jsvalue
-		elif self.contect_ref and self.value_ref is not None:
+		elif self.context_ref and self.value_ref is not None:
 			return jscore.jsvalueref_to_jsvalue(self.context_ref, self.value_ref)
 		raise Exception("Compile function to access jsvalue")
 
@@ -2166,7 +2168,7 @@ class jsobject_accessor:
 		return value
 
 	def __setitem__(self, key, value):
-		self.___set___(k, value)
+		self.___set___(key, value)
 
 	def __invert__(self):
 		return self.___jsobject___
@@ -2414,7 +2416,7 @@ class wasm_module:
 		path = Path(str(path))
 		if not path.is_absolute():
 			path = path.cwd().joinpath(path)
-		with open(path, "w") as module_file:
+		with open(path, "wb") as module_file:
 			module_file.write(self.bytes)
 	
 	@classmethod
@@ -2492,7 +2494,7 @@ class wasm_context(jscore_context):
 		if isinstance(module, Path):
 			module = wasm_module.from_file(module)
 		if not isinstance(module, wasm_module):
-			raise ArgumentError("Module must be wasm_module")
+			raise ImportError("Module must be wasm_module")
 		result = self._modules.get(module.name)
 		if result is not None:
 			return result
@@ -2519,7 +2521,7 @@ class wasm_context(jscore_context):
 	
 	def _load_module_array(self, module_data, name = None, imports = None):
 		if not jscore.jsvalue_is_array_type(module_data, jscore.kJSTypedArrayTypeUint8Array):
-			raise ArgumentError("Module array must be JSValue of an Uint8Array instance type.")
+			raise ImportError("Module array must be JSValue of an Uint8Array instance type.")
 		if name is None:
 			name = "wasm_module_"+str(len(self._modules))
 		namespace = self._create_imports_namespace(imports)
