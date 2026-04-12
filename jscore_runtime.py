@@ -174,7 +174,7 @@ class objc:
 		for pid in protocols:
 			parent = objc.getProtocol(pid)
 			if parent is None:
-				 raise ValueError(f"Protocol not found '{id}'")
+				 raise ValueError(f"Protocol not found '{pid}'")
 			objc.protocol_addProtocol(p, parent)
 		required = True
 		typesLen = len(types)
