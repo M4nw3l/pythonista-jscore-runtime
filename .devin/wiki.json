@@ -1,7 +1,7 @@
 {
   "repo_notes": [
     {
-      "content": "Execute JavaScript and WebAssembly in Pythonista 3 natively on iOS with JavaScriptCore."
+      "content": ""
     }
   ],
   "pages": [
@@ -145,6 +145,15 @@
       "title": "Imports, Exports, and the `wasm_namespace` Proxy",
       "purpose": "Explains the `wasm_namespace` recursive proxy object used to define nested import structures (e.g., `module.imports.env.memory`), how Python callables and `javascript_function` instances are accepted as imports, how `wasm_context.imports` provides context-wide defaults overridden by module-specific imports, how `ImportError` is raised for missing required imports, and how exported WASM functions are exposed as callable `javascript_function` instances via `module.exports`.",
       "parent": "WebAssembly Runtime",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "API Reference",
+      "purpose": "Comprehensive and exhaustive listings and descriptions of public interface, including all classss, members/methods, arguments/parameters, static functions, constants, structures, mappings of Objective-C and C interop of the entire Application Programming Interface refernced directly with the Python source code.",
       "page_notes": [
         {
           "content": ""
