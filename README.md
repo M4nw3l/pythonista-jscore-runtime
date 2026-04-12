@@ -290,7 +290,7 @@ Modules loading has been made to closely align with javascript with a couple of 
 
 ---
 
-[DeepWiki Documentation](https://deepwiki.com/M4nw3l/pythonista-jscore-runtime)
+[DeepWiki Documentation](https://deepwiki.com/M4nw3l/pythonista-jscore-runtime) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/M4nw3l/pythonista-jscore-runtime)
 
 Disclaimer: DeepWiki documentation is AI generated, some inaccuracies or incorrect details are present and should be expected, if in doubt always reference the code. 
 Further content with more agent guidance and wrangling to attempt to improve this documentations accuracy will be added on-going.
