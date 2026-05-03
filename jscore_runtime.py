@@ -13,9 +13,8 @@ from objc_util import *
 from objc_util import (c, object_getClass, class_getName, objc_getProtocol)
 import weakref
 from datetime import (datetime, timezone)
-import json, re
 from pathlib import Path
-import tempfile, shutil, os
+import json, os, re, shutil, tempfile, types
 
 NSDate = ObjCClass("NSDate")
 NSFileManager = ObjCClass("NSFileManager")
@@ -1093,6 +1092,11 @@ class jscore:
 			value_ref = value.get_jsvalue_ref(context_ref)
 			return value_ref
 		if isinstance(value, javascript_function):
+			if value.compiled:
+				ctx_ref, value_ref = cls.jsvalue_get_refs(~value)
+				return value_ref
+			if value.is_native:
+				raise ValueError("Cannot compile native functions (this shouldn't be reachable!')")
 			source = str(value)
 			value_ref = javascript_function.from_source(source, context_ref, parent_ref).compile()
 			return value_ref
@@ -1169,11 +1173,10 @@ class jscore:
 			jsvalue = value.get_jsvalue(context)
 			return jsvalue
 		if isinstance(value, javascript_function):
-			jsvalue = value.jsvalue
-			if jsvalue is not None:
-				return jsvalue
+			if value.compiled:
+				return ~value
 			if value.is_native:
-				raise ValueError("Cannot evaluate native functions (this shouldn't be reachable!')")
+				raise ValueError("Cannot compile native functions (this shouldn't be reachable!')")
 			source = str(value)
 			# this obtains a new jsvalue for a javascript function by evaluating it in the context, 
 			# further escaping and resolving may be required here...
@@ -1544,6 +1547,10 @@ class javascript_function:
 	def is_native(self):
 		repr = str(self).strip()
 		return re.fullmatch("function[^\{]+\{[^\[]+\[native code\][^\}]+}", repr) is not None
+		
+	@property
+	def compiled(self):
+		return self.jsvalue is not None or self.value_ref is not None
 	
 	def __call__(self, *args, **kwargs):
 		return self.call(*args, **kwargs).value
