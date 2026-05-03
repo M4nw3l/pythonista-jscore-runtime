@@ -1065,8 +1065,8 @@ class jscore:
 			return value # assume a void pointer is a value ref
 		if objc.ns_subclass_of(value, cls.JSValue):
 			ctx_ref, value_ref = cls.jsvalue_get_refs(value)
-			if context_ref != ctx_ref:
-				raise Exception("Context mismatch")
+			#if context_ref != ctx_ref:
+			#	raise Exception("Context mismatch")
 			return value_ref # return refs from existing JSValues
 		if objc.ns_subclass_of(value, cls.JSScript):
 			raise Exception("JSScript")
@@ -1374,6 +1374,8 @@ class javascript_value:
 				self._val = javascript_value.undefined
 			if isinstance(self._val, dict):
 				self._val = javascript_object(self._val)
+			elif isinstance(self._val, list):
+				self._val = javascript_list(self._val)
 			self._cached = True
 		return self._val
 		
@@ -1382,6 +1384,25 @@ class javascript_value:
 		
 	def __invert__(self):
 		return self.jsvalue
+
+class javascript_list(list):
+	def __getitem__(self, index):
+		item = super().__getitem__(index)
+		if isinstance(item, dict):
+			item = javascript_object(item)
+		elif isinstance(item, list):
+			item = javascript_list(item)
+		return item
+		
+	def __iter__(self):
+		self.index = -1
+		return self
+	
+	def __next__(self):
+		self.index += 1
+		if self.index < len(self):
+			return self[self.index]
+		raise StopIteration
 
 class javascript_object(dict):
 	def __init__(self, *args, **kwargs):
@@ -1392,6 +1413,8 @@ class javascript_object(dict):
 		value = self.get(key, javascript_value.undefined)
 		if isinstance(value, dict):
 			value = javascript_object(value)
+		elif isinstance(value, list):
+			value = javascript_list(value)
 		return value
 		
 	def __setattr__(self, key, value):
@@ -2649,15 +2672,15 @@ class wasm_context(jscore_context):
 		return result
 	
 	def _create_imports_namespace(self, imports = None):
+		if imports is None:
+			imports = {}
 		namespace = {}
 		for k, v in self._imports.items():
 			namespace[k] = v
-		if imports is None:
-			imports = {}
 		for k, v in imports.items():
 			namespace[k] = v
 		if len(namespace) == 0:
-			return None
+			return namespace
 		namespace = javascript_callback.wrap(self, namespace)
 		jsnamespace = jscore.py_to_jsvalue(self.context, namespace)
 		return jsnamespace
