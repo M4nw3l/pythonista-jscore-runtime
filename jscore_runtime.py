@@ -2841,7 +2841,7 @@ class wasm_component:
 		
 	@property
 	def memory_view(self):
-		return javascript_value(self.env.memory_view).value
+		return self.env.memory_view
 	
 	def _error_handler(self, func, func_name, component_type):
 		def error_handler(*args, **kwargs):
@@ -3072,7 +3072,99 @@ class wasm_wasi:
 		self.env = env
 		self.preview1 = wasi_snapshot_preview1
 		self.context.imports.wasi_snapshot_preview1 = self.preview1
+
+class wasm_memory(javascript_value_base):
+	pass
+
+class wasm_memory_view:
+	def __init__(self, memory, view, littleEndian = True):
+		self.memory = memory
+		self._view = view
+		self._view_obj = view.jsobject
+		self.littleEndian = littleEndian
+	
+	@property
+	def view(self):
+		return self._view.value
+	
+	@property
+	def buffer(self):
+		return self._view_obj.buffer.value
 		
+	@property
+	def byteLength(self):
+		return self._view_obj.byteLength.value
+		
+	@property
+	def byteOffset(self):
+		return self._view_obj.byteOffset.value
+
+	def getBigInt64(self, offset):
+		return self.view.getBigInt64(offset, self.littleEndian)
+
+	def setBigInt64(self, offset, value):
+		self.view.setBigInt64(offset, value, self.littleEndian)
+
+	def getBigUint64(self, offset):
+		return self.view.getBigUint64(offset, self.littleEndian)
+
+	def setBigUint64(self, offset, value):
+		return self.view.setBigUint64(offset, value, self.littleEndian)
+
+	def getFloat16(self, offset):
+		return self.view.getFloat16(offset, self.littleEndian)
+
+	def setFloat16(self, offset, value):
+		return self.view.setFloat16(offset, value, self.littleEndian)
+
+	def getFloat32(self, offset):
+		return self.view.getFloat32(offset, self.littleEndian)
+
+	def setFloat32(self, offset, value):
+		return self.view.setFloat32(offset, value, self.littleEndian)
+
+	def getFloat64(self, offset):
+		return self.view.getFloat64(offset, self.littleEndian)
+
+	def setFloat64(self, offset, value):
+		return self.view.setFloat64(offset, value, self.littleEndian)
+
+	def getInt8(self, offset):
+		return self.view.getInt8(offset, self.littleEndian)
+
+	def setInt8(self, offset, value):
+		return self.view.setInt8(offset, value, self.littleEndian)
+
+	def getInt16(self, offset):
+		return self.view.getInt16(offset, self.littleEndian)
+
+	def setInt16(self, offset, value):
+		return self.view.setInt16(offset, value, self.littleEndian)
+		
+	def getInt32(self, offset):
+		return self.view.getInt32(offset, self.littleEndian)
+
+	def setInt32(self, offset, value):
+		return self.view.setInt32(offset, value, self.littleEndian)
+		
+	def getUint8(self, offset):
+		return self.view.getUint8(offset, self.littleEndian)
+
+	def setUint8(self, offset, value):
+		return self.view.setUint8(offset, value, self.littleEndian)
+		
+	def getUint16(self, offset):
+		return self.view.getUint16(offset, self.littleEndian)
+
+	def setUint16(self, offset, value):
+		return self.view.setUint16(offset, value, self.littleEndian)
+
+	def getUint32(self, offset):
+		return self.view.getUint32(offset, self.littleEndian)
+
+	def setUint32(self, offset, value):
+		return self.view.setUint32(offset, value, self.littleEndian)
+
 class wasm_env:
 	def __init__(self, parent = None, vars = {}, args = [], kwargs = {}, memory_factory = None, memory_view_factory = None):
 		self.parent = parent # parent wasm env
@@ -3107,12 +3199,12 @@ class wasm_env:
 	def _ensure_memory(self):
 		if self._memory_factory is None or self._memory is not None:
 			return
-		self._memory = self._memory_factory()
+		self._memory = wasm_memory(self._memory_factory())
 		
 	def _ensure_memory_view(self):
-		if self._memory_view_factory is None or self._memory_view is not None:
+		if self._memory_view_factory is None or (self._memory_view is not None and self._memory_view.byteLength != 0):
 			return
-		self._memory_view = self._memory_view_factory(self.memory)
+		self._memory_view = wasm_memory_view(self.memory, self._memory_view_factory(self.memory))
 	
 	@property
 	def memory(self):
@@ -3121,8 +3213,10 @@ class wasm_env:
 		
 	@memory.setter
 	def memory(self, value):
-		print(f"set_memory {value}")
-		self._memory = value
+		if value is None:
+			self._memory = None
+		else:
+			self._memory = wasm_memory(value)
 		self._memory_view = None
 		
 	@property
