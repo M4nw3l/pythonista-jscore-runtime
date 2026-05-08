@@ -14,7 +14,11 @@ from objc_util import (c, object_getClass, class_getName, objc_getProtocol)
 import weakref
 from datetime import (datetime, timezone)
 from pathlib import Path
-import json, os, re, shutil, tempfile, types
+import io, json, os, re, shutil, tempfile, types
+import threading
+
+import logging
+log = logging.getLogger(__name__)
 
 NSDate = ObjCClass("NSDate")
 NSFileManager = ObjCClass("NSFileManager")
@@ -321,6 +325,7 @@ class objc:
 
 #JavaScriptCore api
 class jscore:
+	version = __version__
 	JSVirtualMachine = ObjCClass("JSVirtualMachine")
 	JSContext = ObjCClass("JSContext")
 	JSValue = ObjCClass("JSValue")
@@ -574,6 +579,7 @@ class jscore:
 	# representation of context CallbackData
 	class CallbackData(Structure):
 		pass
+
 	CallbackDataPtr = POINTER(CallbackData)
 	CallbackData._fields_ = [
 			("next", CallbackDataPtr),
@@ -585,7 +591,8 @@ class jscore:
 			("arguments", c_void_p),
 			("currentArguments", c_void_p)
 		]
-	
+	# a lock to ensure synchronised access to runtimes
+	_lock = threading.Lock() 
 	_runtime_vm = None
 	_runtime_context = None
 	_runtimes = {}
@@ -600,40 +607,39 @@ class jscore:
 	# runtime singleton access
 	@classmethod
 	def runtime(cls, runtime_class = None):
-		if runtime_class is None:
-			runtime_class = javascript_runtime
-		runtime = cls._runtimes.get(runtime_class)
-		if runtime is None:
-			if cls._runtime_vm is None:
-				cls._runtime_vm = cls.vm_allocate()
-				cls._runtime_context = cls.context_allocate(cls._runtime_vm)
-			runtime = cls.new_runtime(runtime_class, cls._runtime_vm, cls._runtime_context)
-			cls._runtimes[runtime_class] = runtime
-		return runtime
+		with cls._lock:
+			if runtime_class is None:
+				runtime_class = javascript_runtime
+			runtime = cls._runtimes.get(runtime_class)
+			if runtime is None:
+				if cls._runtime_vm is None:
+					cls._runtime_vm = cls.vm_allocate()
+					cls._runtime_context = cls.context_allocate(cls._runtime_vm)
+				runtime = cls.new_runtime(runtime_class, cls._runtime_vm, cls._runtime_context)
+				cls._runtimes[runtime_class] = runtime
+				cls._runtimes_contexts[runtime_class] = runtime.context()
+			return runtime
 
 	@classmethod
 	def _runtimes_cleanup(cls):
-		cls.context_deallocate(cls._runtime_context)
-		cls.vm_deallocate(cls._runtime_vm) # if we destroyed the last singleton runtime reference cleanup shared context and vm  
-		for cleanup in cls._runtime_cleanups:
-			cleanup()
-		# reset everything
-		cls._runtimes = {}
-		cls._runtime_cleanups = []
-		cls._runtimes_contexts = {}
-		cls._runtime_vm = None
-		cls._runtime_context = None
+		with cls._lock:
+			cls.context_deallocate(cls._runtime_context)
+			cls.vm_deallocate(cls._runtime_vm) # if we destroyed the last singleton runtime reference cleanup shared context and vm  
+			for cleanup in cls._runtime_cleanups:
+				cleanup()
+			# reset everything
+			cls._runtimes = {}
+			cls._runtime_cleanups = []
+			cls._runtimes_contexts = {}
+			cls._runtime_vm = None
+			cls._runtime_context = None
 
 	@classmethod
 	def context(cls, runtime_class = None):
 		if runtime_class is None:
 			runtime_class = javascript_runtime
-		context = cls._runtimes_contexts.get(runtime_class)
-		if context is None:
-			runtime = cls.runtime(runtime_class)
-			context = runtime.context()
-			cls._runtimes_contexts[runtime_class] = context
-		return context
+		runtime = cls.runtime(runtime_class)
+		return cls._runtimes_contexts.get(runtime_class)
 
 	@classmethod
 	def javascript(cls):
@@ -649,8 +655,6 @@ class jscore:
 
 	@classmethod
 	def destroy(cls):
-		for typ,context in dict(cls._runtimes_contexts).items():
-			context.destroy()
 		for typ,runtime in dict(cls._runtimes).items():
 			runtime.destroy()
 
@@ -684,12 +688,16 @@ class jscore:
 			cleanup()
 		else:
 			cls._runtime_cleanups.append(cleanup)
+		runtimes_count = -1
 		key = runtime.__class__
 		rt = cls._runtimes.get(key)
 		if runtime is rt: # remove destroyed runtime if its a tracked singleton instance
-			del cls._runtimes[key]
-			if len(cls._runtimes) == 0:
-				cls._runtimes_cleanup()
+			with cls._lock:
+				del cls._runtimes[key]
+				del cls._runtimes_contexts[key]
+				runtimes_count = len(cls._runtimes) == 0
+		if runtimes_count == 0:
+			cls._runtimes_cleanup()
 	
 	_context_lookup = {}
 	_prototype_lookup = {}
@@ -737,10 +745,7 @@ class jscore:
 			self.layout = layout
 	
 	class _context_metadata:
-		_context_lookup = None
 		def __init__(self, context, context_ref, prototypes):
-			self._context_lookup[context] = self
-			self._context_lookup[context_ref.value] = self
 			self.context = context
 			self.context_ref = context_ref
 			self.jsvalueref_to_jsvalue_object = jscore.JSValue.valueWithNewObjectInContext_(context)
@@ -757,7 +762,7 @@ class jscore:
 							"_prototype_": _prototype
 						};
 						for(const field of metadata.layout) {
-							wrapper[field] = _prototype[field];
+							try { wrapper[field] = _prototype[field]; } catch { }
 							if(wrapper[field] === undefined) {
 								wrapper[field] = null; // force a wrapper definition if not defined so we know the key
 							}
@@ -777,7 +782,6 @@ class jscore:
 				_ctor = (~prototype._ctor_).JSValueRef()
 				_prototype = (~prototype._prototype_).JSValueRef()
 				self.ctors[_prototype.value] = _ctor
-				#self.classes[_class.value] = prototype
 				self.prototypes[_ctor.value] = prototype
 				self.prototypes[_prototype.value] = prototype
 				metadata = prototypes[key]
@@ -786,15 +790,21 @@ class jscore:
 				metadata.prototype_object = prototype
 				self.prototypes_metadata[_prototype.value] = metadata
 				self.prototypes_metadata[_ctor.value] = metadata
-				#print(metadata.__dict__)
+		
+		_context_lookup = None
+		_lock = None
+		@classmethod
+		def init(cls, lookup, lock):
+			cls._context_lookup = lookup
+			cls._lock = lock
 		
 		@classmethod
 		def get(cls, id):
 			if isinstance(id, c_void_p):
 				return cls._context_lookup[id.value]
 			return cls._context_lookup[id]
-
-	_context_metadata._context_lookup = _context_lookup
+	
+	_context_metadata.init(_context_lookup, None)
 	
 	@classmethod
 	def prototype_register(cls, name, layout):
@@ -1082,11 +1092,11 @@ class jscore:
 		if isinstance(value, str):
 			str_ref = jscore.str_to_jsstringref(value)
 			return cls.JSValueMakeString(context_ref, str_ref)
-		if isinstance(value, javascript_value):
-			jsvalue = value.jsvalue
+		if isinstance(value, javascript_value_base):
+			jsvalue = ~value
 			ctx_ref, value_ref = cls.jsvalue_get_refs(jsvalue)
-			if context_ref != ctx_ref:
-				raise Exception("Context mismatch")
+			#if context_ref != ctx_ref:
+				#raise Exception("Context mismatch")
 			return value_ref
 		if isinstance(value, javascript_promise):
 			value_ref = value.get_jsvalue_ref(context_ref)
@@ -1166,8 +1176,8 @@ class jscore:
 		if isinstance(value, datetime):
 			timestamp = value.timestamp()
 			return cls.JSValue.valueWithObject_inContext_(cls.initWithTimeIntervalSince1970_(timestamp), context)
-		if isinstance(value, javascript_value):
-			jsvalue = value.jsvalue
+		if isinstance(value, javascript_value_base):
+			jsvalue = ~value
 			return jsvalue
 		if isinstance(value, javascript_promise):
 			jsvalue = value.get_jsvalue(context)
@@ -1245,6 +1255,34 @@ class jscore:
 		#cls.prototype_register("SuppressedError", ["error", "suppressed", "name", "message", "toString"])
 		#cls.prototype_register("InternalError", ["name", "message", "toString"])
 		cls.prototype_register("Promise", ["then", "catch", "finally"])
+		cls.prototype_register("ArrayBuffer", [
+			"byteLength", "detached", "maxByteLength", "resizable", "resize", "transfer", "transferToFixedLength"
+		])
+		cls.prototype_register("DataView", [
+			"buffer", "byteLength", "byteOffset", 
+			"getBigInt64", "getBigUint64", 
+			"setBigInt64", "setBigUint64",
+			"getFloat16", "getFloat32", "getFloat64",
+			"setFloat16", "setFloat32", "setFloat64",
+			"getInt8", "getInt16", "getInt32",
+			"setInt8", "setInt16", "setInt32",
+			"getUint8", "getUint16", "getUint32",
+			"setUint8", "setUint16", "setUint32",
+		])
+		typedArrayMembers = [
+			"buffer", "byteLength", "byteOffset", "length", "BYTES_PER_ELEMENT",
+			"at", "copyWithin", "entries", "every", "fill", "filter", "find", "findIndex", 
+			"findLast", "findLastIndex", "forEach", "includes", "indexOf", "join",
+			"keys", "lastIndexOf", "map", "reduce", "reduceRight", "reverse", "set", "slice", "some", 
+			"sort", "subarray", "toLocaleString", "toReversed", "toSorted", "toString", "values", "with"
+		]
+		typedArrayTypes = [ 
+			"Int8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array", "Int32Array", "Uint32Array",
+			"Float16Array", "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array",
+		]
+		cls.prototype_register("Uint8Array", typedArrayMembers + [ "setFromBase64", "setFromHex", "toBase64", "toHex" ])
+		for arrayType in typedArrayTypes:
+			cls.prototype_register(arrayType, typedArrayMembers)
 		cls._initialised = True
 
 # init metadata
@@ -1288,15 +1326,29 @@ class javascript_encoder(json.JSONEncoder):
 class javascript_undefined_value:
 	def __repr__(self):
 		return "undefined"
-
-class jsvalue_accessor:
+		
+class javascript_value_base:
 	def __init__(self, jsvalue = None, context_ref = None, value_ref = None):
-		self.___jsvalue___ = jsvalue
-		if jsvalue is None:
+		if jsvalue is None and context_ref is None and value_ref is None:
+			raise ValueError("Either jsvalue or context_ref and value_ref must be specified")
+		if isinstance(jsvalue, javascript_value_base):
+			self.___jsvalue___ = ~jsvalue
+		elif jsvalue is not None:
+			self.___jsvalue___ = jsvalue
+		else:
 			self.___jsvalue___ = jscore.jsvalueref_to_jsvalue(context_ref, value_ref)
+			
+	def __repr__(self):
+		return str(jscore.jsvalue_to_py(self.___jsvalue___))
+
+	def __invert__(self):
+		return self.___jsvalue___
+		
+
+class jsvalue_accessor(javascript_value_base):
 
 	def __iter__(self):
-		self.___keys___ = jscore.jsobject_get_keys(self.___jsvalue___)
+		self.___keys___ = jscore.jsobject_get_keys(~self)
 		self.___keys___ = iter(self.___keys___)
 		return self
 		
@@ -1315,7 +1367,7 @@ class jsvalue_accessor:
 		return v
 
 	def ___get___(self, name):
-		jsvalue = self.___jsvalue___
+		jsvalue = ~self
 		if not jsvalue.hasProperty_(name):
 			return None
 		v = jsvalue.valueForProperty_(name)
@@ -1323,17 +1375,17 @@ class jsvalue_accessor:
 			return javascript_value(v)
 		return jsvalue_accessor(v)
 
-	def __repr__(self):
-		return str(jscore.jsvalue_to_py(self.___jsvalue___))
-		
-	def __invert__(self):
-		return self.___jsvalue___
 
-class javascript_value:
+class javascript_value(javascript_value_base):
 	undefined = javascript_undefined_value()
+	
 	@classmethod
 	def is_undefined(cls, value):
 		return value is cls.undefined
+
+	@classmethod
+	def is_defined(cls, value):
+		return value is not cls.undefined
 	
 	@classmethod
 	def is_null(cls, value):
@@ -1342,11 +1394,14 @@ class javascript_value:
 	@classmethod
 	def is_null_or_undefined(cls,value):
 		return cls.is_null(value) or cls.is_undefined(value)
+		
+	@classmethod
+	def is_not_null(cls, value):
+		return not cls.is_null_or_undefined(value)
 
 	def __init__(self, jsvalue = None, context_ref = None, value_ref = None):
-		if jsvalue is None and context_ref is None and value_ref is None:
-			raise ValueError("Either jsvalue or context_ref and value_ref must be specified")
-		self._jsvalue = jsvalue
+		super().__init__(jsvalue, context_ref, value_ref)
+		self._jsvalue = self.___jsvalue___
 		self._context_ref = context_ref
 		self._value_ref = value_ref
 		self._val = None
@@ -1542,7 +1597,13 @@ class javascript_function:
 			return javascript_value(jsvalue, self.context_ref, value_ref)
 
 		raise NotImplementedError("Cannot call this type of javascript_function")
-
+		
+	@property
+	def name(self):
+		src = str(self)
+		m = re.match("function([^\(]*)\(", repr)
+		return m.group().strip()
+		
 	@property
 	def is_native(self):
 		repr = str(self).strip()
@@ -1558,8 +1619,12 @@ class javascript_function:
 	def __repr__(self):
 		if self.source is not None:
 			return self.source
-		if self.jsvalue is not None:
+		try:
+			jsvalue = ~self
 			return str(self.jsvalue)
+		except Exception:
+			pass
+		return "function() {}"
 			
 	def __invert__(self):
 		if self.jsvalue is not None:
@@ -1641,9 +1706,13 @@ class javascript_callback:
 			if isinstance(arg_value, dict):
 				arg_value = javascript_object(arg_value)
 			callback_args.append(arg_value)
-		returnValue = self.callback(*callback_args)
-		returnJSValue_ref = jscore.py_to_jsvalueref(ctx, returnValue)
-		return returnJSValue_ref.value
+		try:
+			returnValue = self.callback(*callback_args)
+			returnJSValue_ref = jscore.py_to_jsvalueref(ctx, returnValue)
+			return returnJSValue_ref.value
+		except Exception as e:
+			log.exception(f"javascript_callback exception '{self.name}' '{self.callback}' {e}")
+			# set an error / exception back in context ?
 		
 	def __invert__(self):
 		if self._jsvalue is not None:
@@ -1778,6 +1847,7 @@ class javascript_promise:
 			raise Exception("Promise must be compiled")
 		return javascript_promise(~(self._promise["finally"](callback)))
 
+
 class jsscript_ref:
 	def __init__(self, runtime, url, source):
 		self.runtime = runtime
@@ -1821,7 +1891,7 @@ class jsscript_ref:
 	def __invert__(self):
 		return self.script_ref
 
-
+#async module loader implementation of JSCoreModuleLoaderDelegate
 class jscore_module_loader:
 	def __init__(self, context):
 		self.runtime = context.runtime
@@ -2030,8 +2100,8 @@ class jscore_context:
 	def js(self):
 		self.alloc()
 		return self.accessor
-	
 
+# runtime base for all javascriptcore runtimes and shared/singleton context
 class jscore_runtime:
 	def __init__(self, vm = None, shared_context = None):
 		self.vm = vm
@@ -2426,13 +2496,6 @@ class javascript_context(jscore_context):
 	def __init__(self, runtime, context = None):
 		super().__init__(runtime, context)
 
-	def allocate(self):
-		super().allocate()
-
-	def deallocate(self):
-		super().deallocate()
-
-
 class javascript_runtime(jscore_runtime):
 	def new_context(self, context):
 		return javascript_context(self, context)
@@ -2481,7 +2544,7 @@ class wasm_namespace:
 
 	def __repr__(self):
 		return str(self.___imports___)
-	
+
 class wasm_module:
 	magic = b'\0asm'
 	version = b'\1\0\0\0'
@@ -2500,10 +2563,11 @@ class wasm_module:
 				return True
 		return False
 	
-	def __init__(self, data = None, name = None, imports = {}):
+	def __init__(self, data = None, name = None, path = None, imports = {}):
 		self.name = name
 		if self.name is not None:
 			self.name = wasm_module.get_module_name(self.name)
+		self.path = path
 		self.data = None
 		self.nsdata = None
 		self.context = None
@@ -2543,7 +2607,7 @@ class wasm_module:
 			return nsdata_to_bytes(self.nsdata)
 		return b''
 		
-	def load(self, context):
+	def load(self, context, env = None):
 		if self.module is not None:
 			return self.instance
 		if self.nsdata is None and self.data is not None:
@@ -2562,8 +2626,14 @@ class wasm_module:
 			raise ImportError(jscore.jsvalueref_to_py(context_ref, ex))
 		# read nsdata directly into Uint8Array backing bytes
 		self.nsdata.getBytes_length_(bytes_ptr, bytes_len)
-		self.module, self.name = self.context._load_module_array(self.jsdata, self.name, self._imports)
+		self.module, self.name = self.context._load_module_array(self.jsdata, self.name, self._imports, env)
 		self.instance = self.module.instance
+		_start = self.exports._start
+		_initialize = self.exports._initialize
+		if javascript_value.is_not_null(_start) and javascript_value.is_not_null(_initialize):
+			raise ImportError("Invalid wasm_module has _start and _initialize exports, modules are commands or reactors mutually exclusively.")
+		if not javascript_value.is_null_or_undefined(_initialize):
+			_initialize() # call initialize for reactors
 		return self.instance
 		
 	@property
@@ -2594,33 +2664,474 @@ class wasm_module:
 			path = path.cwd().joinpath(path)
 		with open(path, "wb") as module_file:
 			module_file.write(self.bytes)
-	
+
+	@classmethod
+	def get_module_version(cls, name):
+		version_index = name.rfind('@')
+		version = ''
+		if version_index > -1:
+			version = name[version_index+1:]
+		return version
+
+	@classmethod
+	def get_module_id(cls, name):
+		module = name.split('@')[0]
+		module = module.split('/')[0]
+		version = cls.get_module_version(name)
+		if len(version) > 0:
+			return f"{module}@{version}"
+		return module
+
 	@classmethod
 	def get_module_name(cls, path):
 		path = str(path)
-		if '/' not in path and '.' not in path:
+		version_index = path.rfind('@')
+		if version_index > -1:
+			path = path[:version_index]
+			path = path.split('/')[0]
+			path = path.replace(':','_')
+		if version_index > -1 or '/' not in path or path.find(':') > 1:
 			return path
-		name = Path(str(path)).name.split('.wasm')[0]
-		if '.' in name:
-			name = name.split('.')[0]
+		name = Path(str(path)).name.split('.component.wasm')[0]
+		name = name.split('.wasm')[0]
+		return name
+		
+	@classmethod
+	def get_module_path(cls, name):
+		id = cls.get_module_id(name)
+		version = cls.get_module_version(id)
+		name = cls.get_module_name(id)
+		if len(version) > 0:
+			return f"{version}/{name}"
 		return name
 	
 	@classmethod
-	def from_file_py(cls, path):
+	def get_file_path(cls, path):
 		path = Path(str(path))
 		if not path.is_absolute():
 			path = path.cwd().joinpath(path)
+		return path
+		
+	@classmethod
+	def get_module_file_path(cls, module):
+		if isinstance(module, cls):
+			return module.path
+		return cls.get_file_path(module)
+	
+	@classmethod
+	def from_file_py(cls, path):
+		path = cls.get_file_path(path)
 		with open(path) as module_file:
 			data = module_file.read()
 			name = cls.get_module_name(path)
-			return cls(data, name)
+			return cls(data, name, path)
 			
 	@classmethod
 	def from_file(cls, path, fileManager = None):
-		data = objc.nsdata_from_file(path, fileManager)
+		path = cls.get_file_path(path)
+		data = objc.nsdata_from_file(str(path), fileManager)
 		name = cls.get_module_name(path)
-		return cls(data, name)
+		return cls(data, name, path)
 
+class wasm_process_thread(threading.Thread):
+	def __init__(self, process, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.process = process
+		#self.lock = threading.Lock()
+		self.awaiter = threading.Condition()
+		self.exit_code = None
+		
+	def run(self):
+		with self.awaiter:
+			self.exit_code = self.process.run()
+			self.awaiter.notify_all()
+
+# represents a lightweight wasm_process which may run as a thread or another execution unit
+# it aims to replicate an interface like subprocess and act as a similar replacement
+# for python code which would interact with a system process which isnt otherwise supported by ios
+class wasm_process:
+	def __init__(self, env, module, args, kwargs):
+		self.env = env
+		self.module = module
+		self.args = args
+		self.kwargs = kwargs
+		self.thread = None
+		self.exception = None
+		self.killing = False
+		self.killed = False
+	
+	@property
+	def exit_code(self):
+		return self.env.exit_code
+		
+	@exit_code.setter
+	def exit_code(self, value):
+		self.env.exit_code = value
+	
+	@property
+	def returncode(self):
+		if self.exit_code is None:
+			return 0
+		return self.exit_code
+		
+	@property
+	def stdin(self):
+		return self.env.stdin
+		
+	@property
+	def stdout(self):
+		return self.env.stdout
+		
+	@property
+	def stderr(self):
+		return self.env.stderr
+	
+	def run(self):
+		# c style _start entry point
+		exit_code = None
+		_start = self.module.exports._start
+		if not javascript_value.is_null_or_undefined(_start):
+			try:
+				exit_code = _start()
+				if javascript_value.is_null_or_undefined(exit_code):
+					exit_code = 0
+				return self._terminated(exit_code)
+			except Exception as e:
+				if self.exit_code is None:
+					exit_code = -1 # exited with exception
+					if not (self.killing or self.killed):
+						self.exception = e
+				log.exception(f"wasm_process terminated unexpectedly, exception: {e}")
+		else:
+			exit_code = -1 # no entry point 
+		return self._terminated(exit_code)
+	
+	def run_async(self):
+		if self.thread is not None:
+			raise Exception("Process thread is already running.")
+		self.thread = wasm_process_thread(self)
+		self.thread.start()
+		return self
+
+	def communicate(self, input = None, stdin = None, timeout = None):
+		if self.thread is not None: # this needs to perform a stdin/out pump loop
+			self.thread.join(timeout=timeout)
+		return self.stdout.getvalue(), self.stderr.getvalue()
+
+	def kill(self, *args, **kwargs):
+		self.killing = True
+		self.killed = True
+		# this needs to actually kill the thread
+	
+	def _terminated(self, exit_code = None):
+		self.thread = None
+		if exit_code is not None:
+			self.exit_code = exit_code
+		return self.exit_code
+
+class wasm_component:
+	def __init__(self, wasi, env):
+		self._wrap_error_handlers()
+		self.wasi = wasi
+		self.env = env
+	
+	@property
+	def memory(self):
+		return self.env.memory
+		
+	@property
+	def memory_view(self):
+		return javascript_value(self.env.memory_view).value
+	
+	def _error_handler(self, func, func_name, component_type):
+		def error_handler(*args, **kwargs):
+			print(f"call: {func_name}")
+			try:
+				return func(*args, **kwargs)
+			except Exception as e:
+				print(e)
+				log.exception(f"Exception in wasm_component {component_type}.{func_name}: {e}")
+				return 1 # we need to return a failure code to wasm if an error or exception is not otherwise handled
+		return error_handler
+	
+	def _wrap_error_handlers(self):
+		class _exclude_members(wasm_component):
+			def __init__(self):
+				pass
+		attr_names = set(dir(self)) - set(dir(_exclude_members()))
+		component_type = type(self)
+		for attr_name in attr_names:
+			attr = getattr(self, attr_name)
+			if callable(attr):
+				setattr(self, attr_name, self._error_handler(attr, attr_name, component_type))
+
+		
+# https://github.com/WebAssembly/WASI/blob/v0.2.11/docs/Preview2.md
+class wasi_io(wasm_component):
+	pass
+
+class wasi_clocks(wasm_component):
+	pass
+
+class wasi_random(wasm_component):
+	pass
+
+class wasi_filesystem(wasm_component):
+	pass
+	
+class wasi_sockets(wasm_component):
+	pass
+	
+class wasi_cli(wasm_component):
+	pass
+
+class wasi_http(wasm_component):
+	pass
+
+#https://github.com/WebAssembly/WASI/blob/wasi-0.1/preview1/witx/wasi_snapshot_preview1.witx
+#https://github.com/WebAssembly/WASI/blob/wasi-0.1/tools/witx/src/abi.rs
+# preview1: wasi_snapshot_preview1
+# preview0: wasi_unstable, snapshot_0
+class wasi_snapshot_preview1(wasm_component):
+
+	def args_get(self, argv, argv_buf, *args):
+		print("wasi: args_get", argv, argv_buf, args)
+		return 0
+
+	def args_sizes_get(self, count, size):
+		print("wasi: args_sizes_get", count, size)
+		
+		self.memory_view.setUint32(count, len(self.env.args))
+		self.memory_view.setUint32(size, len(" ".join(self.env.args))+1)
+		print("count:", self.memory_view.getInt32(count))
+		print("size:", self.memory_view.getInt32(size))
+		return 0
+
+	def environ_get(self, environ, environ_buf):
+		return 0
+
+	def environ_sizes_get(self):
+		return 0
+
+	def clock_res_get(self, id):
+		return 0
+
+	def clock_time_get(self, id, precision):
+		return 0
+
+	def fd_advise(self, fd, offset, len, advice):
+		return 0
+
+	def fd_allocate(self, fd, offset, len):
+		return 0
+
+	def fd_close(self, fd):
+		return 0
+
+	def fd_datasync(self, fd):
+		return 0
+
+	def fd_fdstat_get(self, fd):
+		return 0
+
+	def fd_fdstat_set_flags(self, fd, flags):
+		return 0
+
+	def fd_fdstat_set_rights(self, fd, fs_rights_base, fs_rights_inheriting):
+		return 0
+
+	def fd_filestat_get(self, fd):
+		return 0
+
+	def fd_filestat_set_size(self, fd, size):
+		return 0
+
+	def fd_filestat_set_times(self, fd, atim, mtim, fst_flags):
+		return 0
+
+	def fd_pread(self, fd, iovs, offset):
+		return 0
+
+	def fd_prestat_get(self, fd):
+		return 0
+
+	def fd_prestat_dir_name(self, fd, path, pathlen):
+		return 0
+
+	def fd_pwrite(self, fd, iovs, offset):
+		return 0
+
+	def fd_read(self, fd, iovs):
+		return 0
+
+	def fd_readdir(self, fd, buf, buf_len, cookie):
+		return 0
+
+	def fd_renumber(self, fd, to):
+		return 0
+
+	def fd_seek(self, fd, offset, whence):
+		return 0
+
+	def fd_sync(self, fd):
+		return 0
+
+	def fd_tell(self, fd):
+		return 0
+
+	def fd_write(self, fd, ciovs_buf, ciovs_count, ciov_size):
+		print("wasi: fd_write", fd, ciovs_buf, ciovs_count, ciov_size)
+		stream = None
+		if fd == 0:
+			stream = self.env.stdin
+			print("stdin")
+		elif fd == 1:
+			stream = self.env.stdout
+			print("stdout")
+		elif fd == 2:
+			stream = self.env.stderr
+			print("stderr")
+		else:
+			pass
+		print(self.memory_view.buffer)
+		for i in range(int(ciovs_count)):
+			ciov = ciovs_buf + i * ciov_size
+			ptr = self.memory_view.getUint8(ciov)
+			len = self.memory_view.getUint32(ciov+1)
+			print(ptr, len)
+			buffer = []
+			for ii in range(len):
+				b = self.memory_view.getUint8(ptr + ii)
+				buffer.append(b)
+			buffer = bytes(buffer)
+			print(buffer)
+		return 0
+
+	def path_create_directory(self, fd, path):
+		return 0
+
+	def path_filestat_get(self, fd, flags, path):
+		return 0
+
+	def path_filestat_set_times(self, fd, flags, path, atim, mtim, fst_flags):
+		return 0
+
+	def path_link(self, old_fd, old_flags, old_path, new_fd, new_path):
+		return 0
+
+	def path_open(self, fd, dirflags, path, oflags, fs_rights_base, fs_rights_inheriting, fdflags):
+		return 0
+
+	def path_readlink(self, fd, path, buf, buf_len):
+		return 0
+
+	def path_remove_directory(self, fd, path):
+		return 0
+
+	def path_rename(self, fd, old_path, new_fd, new_path):
+		return 0
+
+	def path_symlink(self, old_path, fd, new_path):
+		return 0
+
+	def path_unlink_file(self, fd, path):
+		return 0
+		
+	def poll_oneoff(self, events_in, events_out, nsubscriptions):
+		return 0
+
+	def proc_exit(self, rval):
+		print("wasi: proc_exit", rval)
+		self.env.exit_code = int(rval)
+		return 0
+
+	def proc_raise(self, sig):
+		return 0
+
+	def sched_yield(self):
+		return 0
+
+	def random_get(self, buf, buf_len):
+		return 0
+
+	def sock_accept(self, fd, flags):
+		return 0
+
+	def sock_recv(self, fd, ri_data, ri_flags):
+		return 0
+
+	def sock_send(self, fd, si_data, si_flags):
+		return 0
+
+	def sock_shutdown(self, fd, how):
+		return 0
+
+class wasm_wasi:
+	def __init__(self, context, env):
+		self.context = context
+		self.env = env
+		self.preview1 = wasi_snapshot_preview1
+		self.context.imports.wasi_snapshot_preview1 = self.preview1
+		
+class wasm_env:
+	def __init__(self, parent = None, vars = {}, args = [], kwargs = {}, memory_factory = None, memory_view_factory = None):
+		self.parent = parent # parent wasm env
+		self.vars = vars
+		self.args = args
+		self.kwargs = kwargs
+		self.dirs = {}
+		self._exit_code = None
+		self.stdin = io.StringIO()
+		self.stdout = io.StringIO()
+		self.stderr = io.StringIO()
+		self._memory_factory = memory_factory
+		self._memory_view_factory = memory_view_factory
+		self._memory = None
+		self._memory_view = None
+		self._components = None
+		
+	@property
+	def exit_code(self):
+		return self._exit_code
+		
+	@exit_code.setter
+	def exit_code(self, value):
+		self._exit_code = value
+	
+	@property
+	def components(self):
+		if self._components is None:
+			self._components = {}
+		return self._components
+	
+	def _ensure_memory(self):
+		if self._memory_factory is None or self._memory is not None:
+			return
+		self._memory = self._memory_factory()
+		
+	def _ensure_memory_view(self):
+		if self._memory_view_factory is None or self._memory_view is not None:
+			return
+		self._memory_view = self._memory_view_factory(self.memory)
+	
+	@property
+	def memory(self):
+		self._ensure_memory()
+		return self._memory
+		
+	@memory.setter
+	def memory(self, value):
+		print(f"set_memory {value}")
+		self._memory = value
+		self._memory_view = None
+		
+	@property
+	def memory_view(self):
+		self._ensure_memory_view()
+		return self._memory_view
+	
+	def preopen(self, dir):
+		pass
 
 class wasm_context(jscore_context):
 	def __init__(self, runtime, context = None):
@@ -2628,21 +3139,37 @@ class wasm_context(jscore_context):
 		self._modules = {}
 		self._imports = {}
 		self._namespace = wasm_namespace(self._imports)
+		self._env = wasm_env()
+		self._wasi = wasm_wasi(self, self._env)
 		
 	def allocate(self):
 		super().allocate()
-		self._load_module = self.eval("""(function() {
-		const _jscore_wasm_modules = {}
-		return function _jscore_wasm_load(name, wasm_bin, namespace){
-				if(namespace === null) { namespace = {}; }
+		self._loader = self.eval("""(function() {
+		const _jscore_wasm_modules = {};
+		return {
+			"module_load": function (name, wasm_bin){
 				const wasm_module = new WebAssembly.Module(wasm_bin);
+				const wasm_module_imports = WebAssembly.Module.imports(wasm_module);
+				const wasm_module_exports = WebAssembly.Module.exports(wasm_module);
+				const wasm_module_info = {"module": wasm_module, "imports": wasm_module_imports, "exports": wasm_module_exports };
+				_jscore_wasm_modules[name] = wasm_module_info; // ensure module remains in scope
+				return wasm_module_info;
+			},
+			"module_instantiate": function (name, namespace){
+				const wasm_module = _jscore_wasm_modules[name].module
 				const wasm_instance = new WebAssembly.Instance(wasm_module, namespace);
-				const wasm_module_instance = {"instance": wasm_instance, "namespace": namespace, "module": wasm_module};
-				_jscore_wasm_modules[name] = wasm_module_instance; // ensure module remains in scope
-				return wasm_module_instance;
-		};})();""").value
+				return {"instance": wasm_instance, "namespace": namespace, "module": wasm_module};
+			},
+			"memory_create": function(opts) {
+				return new WebAssembly.Memory(opts);
+			},
+			"memory_view_create": function(wasm_memory) {
+				return new DataView(wasm_memory.buffer);
+			},
+			};})();""").value
 		
 	def deallocate(self):
+		deallocating = True
 		for name,module in self._modules.items():
 			module.free()
 		self._modules = None
@@ -2666,44 +3193,146 @@ class wasm_context(jscore_context):
 			return None
 		return module.instance
 		
-	def load_module(self, module):
+	def find_module(self, name):
+		module_path = wasm_module.get_module_path(name)
+		module_name = wasm_module.get_module_name(name)
+		paths = ["./", "./lib/", "./wasm/"]
+		for path in paths:
+			filenames = [
+				f"{path}/{module_path}.wasm",
+				f"{path}/{module_name}.wasm",
+			]
+			for filename in filenames:
+				path = Path(filename)
+				if path.exists():
+					return path
+		return None
+		
+	def load_module(self, module, env = None):
+		print(f"load: {module}")
+		if isinstance(module, str):
+			if module.startswith("/") or module.startswith("./") or module.endswith(".wasm"):
+				module = Path(module)
+			else:
+				name = module
+				module = self.find_module(name)
+				if module is None:
+					raise ImportError(f"Module '{name}' not found.")
 		if isinstance(module, Path):
+			module_name = wasm_module.get_module_name(module)
+			existing_module = self._modules.get(module_name)
+			if existing_module is not None:
+				return existing_module
 			module = wasm_module.from_file(module)
 		if not isinstance(module, wasm_module):
 			raise ImportError("Module must be wasm_module")
-		result = self._modules.get(module.name)
-		if result is not None:
-			return result
-		result = module.load(self)
+		result = module.load(self, env)
 		self._modules[module.name] = module
 		return result
-	
-	def _create_imports_namespace(self, imports = None):
+		
+	def _resolve_module_imports(self, module, imports, env):
 		if imports is None:
 			imports = {}
 		namespace = {}
-		for k, v in self._imports.items():
-			namespace[k] = v
-		for k, v in imports.items():
-			namespace[k] = v
-		if len(namespace) == 0:
-			return namespace
+		print("imports:", module.imports)
+		print("exports:", module.exports)
+		for module_import in module.imports:
+			module_name = module_import.module
+			import_name = module_import.name
+			resolved_import = None
+			if module_name == "js" and import_name == "memory":
+				resolved_import = env.memory
+			else:
+				imports_module = imports.get(module_name)
+				if imports_module is None:
+					imports_module = self._imports.get(module_name)
+				if imports_module is None:
+					imports_module = {}
+					imports[module_name] = imports_module
+				if isinstance(imports_module, types.ModuleType):
+					imports_module = getattr(imports_module, module_name)
+				if isinstance(imports_module, type):
+					if issubclass(imports_module, wasm_component):
+						component_class = imports_module
+						component = env.components.get(component_class)
+						if component is None:
+							component = component_class(self._wasi, env)
+							env.components[component_class] = component
+						if not hasattr(component, import_name):
+							raise ImportError(f'Component "{component_class}" for module "{module_name}" missing expected import "{import_name}"')
+						resolved_import = getattr(component, import_name)
+				elif isinstance(imports_module, dict):
+					resolved_import = imports_module.get(import_name)
+				elif isinstance(imports_module, wasm_module):
+					# if we have a module attempt to get export
+					resolved_import = imports_module.exports[import_name]
+				elif hasattr(imports_module, import_name):
+					# if we have a class instance / wasm_component shim resolve from attributes
+					resolved_import = getattr(imports_module, import_name)
+				if javascript_value.is_null_or_undefined(resolved_import):
+					# might need to check more for loading
+					resolved_module = self.module_instance(module_name) 
+					# above may be wrong for memory handling!
+					# might need to create a new instance... settings for shared-everything vs shared-nothing abi?
+					if resolved_module is None:
+						resolved_module = self.load_module(module_name, env)
+					resolved_import = resolved_module.exports[import_name]
+			# wire up resolved import to module namespace
+			if javascript_value.is_null_or_undefined(resolved_import):
+				raise ImportError(f"Import '{module_name}.{import_name}' not found.")
+			ns = namespace.get(module_name)
+			if ns is None:
+				ns = {}
+				namespace[module_name] = ns
+			ns[import_name] = resolved_import
 		namespace = javascript_callback.wrap(self, namespace)
-		jsnamespace = jscore.py_to_jsvalue(self.context, namespace)
-		return jsnamespace
-		
-	def _add_module_to_global_namespace(self, module, name): #?
-		pass
+		return namespace
 	
-	def _load_module_array(self, module_data, name = None, imports = None):
+	def _load_module_array(self, module_data, name = None, imports = None, env = None):
 		if not jscore.jsvalue_is_array_type(module_data, jscore.kJSTypedArrayTypeUint8Array):
 			raise ImportError("Module array must be JSValue of an Uint8Array instance type.")
 		if name is None:
 			name = "wasm_module_"+str(len(self._modules))
-		namespace = self._create_imports_namespace(imports)
-		result = self._load_module(name, module_data, namespace)
-		self._add_module_to_global_namespace(result, name)
-		return result, name
+		module = self._loader.module_load(name, module_data)
+		namespace = self._resolve_module_imports(module, imports, env)
+		module_instance = self._loader.module_instantiate.call(name, namespace)
+		instance = module_instance.jsobject.instance
+		memory = instance.exports.memory
+		if javascript_value.is_not_null(memory) and env is not None:
+			env.memory = memory
+		return module_instance.value, name
+	
+	# creates a wasm_process which runs with this context
+	def new_process(self, module, *args, **kwargs):
+		env_vars = {}
+		module_path = str(wasm_module.get_module_file_path(module))
+		args = ( module_path, ) + args
+		memory_factory = lambda: self._loader.memory_create.call({ "initial": 1 })
+		memory_view_factory = lambda memory: self._loader.memory_view_create.call(memory)
+		env = wasm_env(self._env, env_vars, args, kwargs, memory_factory, memory_view_factory)
+		module = self.load_module(module, env = env)
+		process = wasm_process(env, module, args, kwargs)
+		return process
+	
+	def run(self, module, *args, **kwargs):
+		# wasm/wasi synchronous run, this runs the given module/program on the current thread until termination
+		process = self.new_process(module, *args, **kwargs)
+		return process.run()
+
+	def run_async(self, module, *args, **kwargs):
+		# wasm/wasi asynchronous run, this runs the given module/program on a new thread until termination
+		process = self.new_process(module, *args, **kwargs)
+		return process.run_async()
+		
+	def serve(self, path, *args, **kwargs):
+		# wasm/wasi serve placeholder
+		# server needs handling as running a standard http server
+		# this should run synchronously / block until termination
+		pass
+		
+	def serve_async(self, path, *args, **kwargs):
+		# async serve variant as background thread?
+		pass
 
 
 class wasm_runtime(jscore_runtime):
@@ -2713,329 +3342,341 @@ class wasm_runtime(jscore_runtime):
 
 if __name__ == '__main__':
 	import console
-	
 	console.clear()
+
+	run_tests = False
+	run_wasi_tests = True
 	
-	runtime = jscore.runtime()
-	context = runtime.context()
-	expected_unset = object()
+	if run_tests:
 
-	valueMatch = None
-	arrayMatch = None
-	objectMatch = None
-
-	def valueMatch(expected, value, values = {}, repr = False):
-		if expected is None:
-			return value is None
-		if expected is javascript_value.undefined:
-			return value is javascript_value.undefined
-		if isinstance(expected, dict):
-			if not isinstance(value, dict):
+		runtime = jscore.runtime()
+		context = runtime.context()
+		expected_unset = object()
+	
+		valueMatch = None
+		arrayMatch = None
+		objectMatch = None
+	
+		def valueMatch(expected, value, values = {}, repr = False):
+			if expected is None:
+				return value is None
+			if expected is javascript_value.undefined:
+				return value is javascript_value.undefined
+			if isinstance(expected, dict):
+				if not isinstance(value, dict):
+					return False
+				return objectMatch(expected, value)
+			elif isinstance(expected, list):
+				if not isinstance(value, list):
+					return False
+				return arrayMatch(expected, value)
+			elif expected is not value and expected != value:
+				if repr and not isinstance(value,str):
+					return expected == str(value)
+				if callable(expected):
+					expected = expected()
+					values["expected"] = expected
+					return valueMatch(expected, value, repr, values)
+				if callable(value):
+					value = value()
+					values["value"] = value
+					return valueMatch(expected, value, repr, values)
 				return False
-			return objectMatch(expected, value)
-		elif isinstance(expected, list):
-			if not isinstance(value, list):
+			return True
+	
+		def arrayMatch(expected, value):
+			if expected is None:
+				return value is None
+			if expected is javascript_value.undefined:
+				return value is javascript_value.undefined
+			if not isinstance(expected, list) or not isinstance(value, list):
 				return False
-			return arrayMatch(expected, value)
-		elif expected is not value and expected != value:
-			if repr and not isinstance(value,str):
-				return expected == str(value)
-			if callable(expected):
-				expected = expected()
-				values["expected"] = expected
-				return valueMatch(expected, value, repr, values)
-			if callable(value):
-				value = value()
-				values["value"] = value
-				return valueMatch(expected, value, repr, values)
-			return False
-		return True
-
-	def arrayMatch(expected, value):
-		if expected is None:
-			return value is None
-		if expected is javascript_value.undefined:
-			return value is javascript_value.undefined
-		if not isinstance(expected, list) or not isinstance(value, list):
-			return False
-		if len(expected) != len(value):
-			return False
-		for i in range(len(value)):
-			e = expected[i]
-			v = value[i]
-			if not valueMatch(expected[i], value[i]):
+			if len(expected) != len(value):
 				return False
-		return True
-
-	def objectMatch(expected, value):
-		if expected is None:
-			return value is None
-		if expected is javascript_value.undefined:
-			return value is javascript_value.undefined
-		if not isinstance(expected, dict) or not isinstance(value, dict):
-			return False
-		for k, v in expected.items():
-			if not k in value:
+			for i in range(len(value)):
+				e = expected[i]
+				v = value[i]
+				if not valueMatch(expected[i], value[i]):
+					return False
+			return True
+	
+		def objectMatch(expected, value):
+			if expected is None:
+				return value is None
+			if expected is javascript_value.undefined:
+				return value is javascript_value.undefined
+			if not isinstance(expected, dict) or not isinstance(value, dict):
 				return False
-			vv = value[k]
-			if not valueMatch(v, vv):
-				return False
-		return True
-
-	def eval(script, expected=expected_unset, **kwargs):
-		print(f'Execute:\n{script}\n')
-		result = context.eval(script)
-		value = result.value
-		ex = result.exception
-		print(f'Result:\n{value}\n')
-		if not ex is None:
-			print(f'Exception:\n{ex}')
-		if expected is not expected_unset:
-			values = {"expected":expected, "value":value}
-			match = valueMatch(expected, value, values=values, **kwargs)
-			expected = values["expected"]
-			value = values["value"]
-			print(f"Expected: {expected}\nActual: {value}\nPassed: {match}")
-		print("-" * 35)
-		return value
-		
-	def header(text, end_only = False):
-		if not end_only:
-			print("")
+			for k, v in expected.items():
+				if not k in value:
+					return False
+				vv = value[k]
+				if not valueMatch(v, vv):
+					return False
+			return True
+	
+		def eval(script, expected=expected_unset, **kwargs):
+			print(f'Execute:\n{script}\n')
+			result = context.eval(script)
+			value = result.value
+			ex = result.exception
+			print(f'Result:\n{value}\n')
+			if not ex is None:
+				print(f'Exception:\n{ex}')
+			if expected is not expected_unset:
+				values = {"expected":expected, "value":value}
+				match = valueMatch(expected, value, values=values, **kwargs)
+				expected = values["expected"]
+				value = values["value"]
+				print(f"Expected: {expected}\nActual: {value}\nPassed: {match}")
 			print("-" * 35)
-		print(text)
-		print("-" * 35)
-		print("")
+			return value
+			
+		def header(text, end_only = False):
+			if not end_only:
+				print("")
+				print("-" * 35)
+			print(text)
+			print("-" * 35)
+			print("")
+	
+		header("javascript runtime")
+		print(runtime, context)
+		header("primitives", True)
+		eval("parseInt('1')", 1)
+		
+		eval("1+1", 2)
+		
+		eval("parseFloat('1.20')", 1.2)
+		
+		eval("1.1 + 1.1", 2.2)
+		
+		eval("1.02", 1.02)
+		
+		eval("false", False)
+		
+		eval("true", True)
+		
+		eval("'c'", 'c')
+	
+		header("strings")
+	
+		eval('"string"', "string")
+		
+		header("datetimes")
+		
+		eval("new Date()")
+		
+		header("exceptions")
+		eval('throw "errooorrr";')
+		eval('throw new Error("Error message");');
+		eval('throw new EvalError("EvalError message");')
+		eval('throw new RangeError("RangeError message");')
+		eval('throw new ReferenceError("ReferenceError message");')
+		eval('throw new SyntaxError("SyntaxError message");')
+		eval('throw new TypeError("TypeError message");')
+		eval('throw new URIError("URIError message");')
+		eval('throw new AggregateError([new Error("AggregatedError")], "AggregateError message");')
+		
+		header("arrays")
+		eval("[]", [])
+		
+		eval("[ 1, 2 , 3 ]", [ 1, 2, 3 ])
+		
+		eval("[ true, false, true, false ]", [ True, False, True, False ])
+		
+		eval("[ 'a', 'b', 'c' ]", [ 'a', 'b', 'c' ])
+		
+		eval('[ "abc" , "def", "ghi" ]', [ "abc" , "def", "ghi" ])
+		
+		eval('[ [1,"2"], ["a"], [{"1":2, "obj":{}, "arr":[]}]]', [ [1,"2"], ["a"], [ {"1":2, "obj":{}, "arr":[] }]])
+		
+		header("objects")
+		eval('const obj = { "str": "str", "int": 1, "float": 1.4, "obj":{ "hello": "world"} }; obj;', {"str":"str", "int":1, "float": 1.4, "obj": {"hello": "world"}})
+	
+		eval('const fn = function() { return 10; }; fn;', 10)
+		
+		eval('const fnobj = { "fn": function() { return 10; }}; fnobj;', {"fn": 10})
+	
+		header("wasm")
+		#instantiate empty module
+		eval('''(function(){
+		const bin = new Uint8Array([0,97,115,109,1,0,0,0]);
+		let result = null;
+		try
+		{
+				const module = new WebAssembly.Module(bin);
+				const instance = new WebAssembly.Instance(module);
+				result = ''+module+' '+instance;
+		}
+		catch(ex)
+		{
+			result = ''+ex;
+		}
+		return result;
+		})();
+		//
+		''')
+		# A memset test as described:
+		# https://developer.apple.com/forums/thread/121040
+		inst = eval('''(function(){
+		const bin = new Uint8Array([0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,3,2,1,0,5,3,1,0,1,7,8,1,4,116,101,115,116,0,0,10,16,1,14,0,32,0,65,1,54,2,0,32,0,40,2,0,11]);
+		let result = null;
+		try
+		{
+				const module = new WebAssembly.Module(bin);
+				const instance = new WebAssembly.Instance(module);
+				result = ''+module+' '+instance;
+				result += '\\n'+instance.exports.test(4);
+				return instance;
+		}
+		catch(ex)
+		{
+			result = ''+ex;
+		}
+		return result;
+		})();
+		//
+		''')
+		
+		print(inst.exports.test.is_native)
+		
+		header("context.js interop")
+		header("Create new object", True)
+		print("context.js.interop_obj = { 'test':{'object':[]}, 'int':1, 'double':2.45 }")
+		context.js.interop_obj = { 'test':{'object':[]}, 'int':1, 'double':2.45 }
+		print("Result:", context.js.interop_obj)
+		
+		header("Modify object")
+		print("context.js.interop_obj = { 'test':{'object':[1,2,3]}, 'int':1, 'double':2.45 }")
+		context.js.interop_obj = { 'test':{'object':[1,2,3]}, 'int':1, 'double':2.45 }
+		print("Result:", context.js.interop_obj)
+		
+		header("Create new function")
+		print('"interopfn" in context.js = ', "interopfn" in context.js)
+		print('context.js.interopfn = javascript_function.from_body("function() { return 20; }")')
+		context.js.interopfn = javascript_function.from_source("function() { return 20; }")
+		print('"interopfn" in context.js = ', "interopfn" in context.js)
+		print("Result:",context.js.interopfn, context.js.interopfn())
+		
+		header("Define/Load function")
+		print('"fndeftest" in context.js = ', "fndeftest" in context.js)
+		print('context.eval("function fndeftest() { return 123; }")')
+		context.eval("function fndeftest() { return 123; }")
+		print('"fndeftest" in context.js = ', "fndeftest" in context.js)
+		print("Result:", context.js.fndeftest, context.js.fndeftest())
+		
+		header("Define python functions callable from js")
+		context.js.pythonfn = lambda text: print(text)
+		print("context.js.pythonfn = lambda text: print(text)")
+		print(context.js.pythonfn)
+		print("context.eval('pythonfn(\"Hello python\");')")
+		context.eval('pythonfn("Hello python");')
+		print()
+		context.js.python_val = lambda: {"str": "Hello from python", "num":10, "list":[1,2,3]}
+		print('context.js.python_val = lambda: {"str": "Hello from python", "num":10, "list":[1,2,3]}')
+		print(context.js.python_val)
+		print("context.eval('python_val();')")
+		print(context.eval('python_val();'))
+		
+		header("Python objects")
+		class MyObject:
+			def __init__(self):
+				self.hello = "world"
+		
+		context.js.my_object = MyObject()
+		print(context.js.my_object)
+		
+		header("Promise")
+		p = context.eval("""new Promise((resolve,reject) => { 
+			resolve("resolve");
+		});
+		""").value.then(lambda v: print("then:", v)).catch(lambda e: print("catch:", e))
+		
+		p = context.eval("""new Promise((resolve,reject) => { 
+			reject("reject");
+		});
+		""").value.then(lambda v: print("then:", v)).catch(lambda e: print("catch:", e))
+		
+		p = context.eval("""new Promise((resolve,reject) => { 
+			throw new Error("exception");
+		});
+		""").value.then(lambda v: print("then:", v)).catch(lambda e: print("catch:", e))
+		
+		p = context.eval("""new Promise((resolve,reject) => { 
+			resolve("resolve")
+		});
+		""").value.then(lambda v: print("then:", v)).catch(lambda e: print("catch:", e))["finally"](lambda: print("finally"))
+		
+		p = context.eval("""new Promise((resolve,reject) => { 
+			reject("reject");
+		});
+		""").value.then(lambda v: print("then:", v)).catch(lambda e: print("catch:", e))["finally"](lambda: print("finally"))
+		
+		p = context.eval("""new Promise((resolve,reject) => { 
+			throw new Error("exception");
+		});
+		""").value.then(lambda v: print("then:", v)).catch(lambda e: print("catch:", e))["finally"](lambda: print("finally"))
+		
+		header("Modules/scripts")
+		if Path("./test.js").exists():
+			context.js.print = lambda *v: print(*v)
+			context.eval("""
+			import('file://./test.js').then((x) => {
+				print('mod then');
+				print(x.filetest);
+				return x;
+				}).catch((e) => {
+					print('mod catch');
+					print(e.message);
+				});
+			""").value.then(lambda *v: print("loaded"))
+	
+		script_ref = runtime.load_script_ref(source="function script_ref(){ return 232; }; [1, '2', new Date(), script_ref, {'a':[]}];" , url="reftest.js")
+		value, exception = script_ref.eval(context)
+		print(value, exception, context.js.script_ref)
+		context.destroy()
+		runtime.destroy()
+		print(jscore._runtimes)
+		
+		header("wasm runtime")
+		runtime = jscore.runtime(wasm_runtime)
+		context = runtime.context()
+		print(runtime, context)
+		
+		module = wasm_module([0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,3,2,1,0,5,3,1,0,1,7,8,1,4,116,101,115,116,0,0,10,16,1,14,0,32,0,65,1,54,2,0,32,0,40,2,0,11])
+		context.load_module(module)
+		print(module.exports)
+	
+		#https://developer.mozilla.org/en-US/docs/WebAssembly/Guides/Using_the_JavaScript_API
+		simple_module_path = Path("./simple.wasm")
+		if simple_module_path.exists():
+			header("simple.wasm")
+			simple_module = wasm_module.from_file("./simple.wasm")
+			simple_module.imports.my_namespace.imported_func = lambda *v: print(*v)
+			context.load_module(simple_module)
+			print(simple_module.exports)
+			simple_module.exports.exported_func()
+	
+		context.destroy()
+		runtime.destroy()
+	
+		js_context = jscore.js()
+		js_context.js.hello = "javascript"
+		
+		wasm_context = jscore.wasm()
+		print(wasm_context.js.hello)
+		wasm_context.js.hello = "wasm"
+		
+		print(js_context.js.hello)
+		
+		jscore.destroy()
 
-	header("javascript runtime")
-	print(runtime, context)
-	header("primitives", True)
-	eval("parseInt('1')", 1)
+	if run_wasi_tests:
+		test_suite_path = Path("./wasi_testsuite/wasm32-wasip").absolute()
+		test_suite_path = str(test_suite_path)
+		test_adapter_path = Path("./wasi_testsuite/jscore_runtime_adapter.py").absolute()
+		test_adapter_path = str(test_adapter_path)
 	
-	eval("1+1", 2)
-	
-	eval("parseFloat('1.20')", 1.2)
-	
-	eval("1.1 + 1.1", 2.2)
-	
-	eval("1.02", 1.02)
-	
-	eval("false", False)
-	
-	eval("true", True)
-	
-	eval("'c'", 'c')
-
-	header("strings")
-
-	eval('"string"', "string")
-	
-	header("datetimes")
-	
-	eval("new Date()")
-	
-	header("exceptions")
-	eval('throw "errooorrr";')
-	eval('throw new Error("Error message");');
-	eval('throw new EvalError("EvalError message");')
-	eval('throw new RangeError("RangeError message");')
-	eval('throw new ReferenceError("ReferenceError message");')
-	eval('throw new SyntaxError("SyntaxError message");')
-	eval('throw new TypeError("TypeError message");')
-	eval('throw new URIError("URIError message");')
-	eval('throw new AggregateError([new Error("AggregatedError")], "AggregateError message");')
-	
-	header("arrays")
-	eval("[]", [])
-	
-	eval("[ 1, 2 , 3 ]", [ 1, 2, 3 ])
-	
-	eval("[ true, false, true, false ]", [ True, False, True, False ])
-	
-	eval("[ 'a', 'b', 'c' ]", [ 'a', 'b', 'c' ])
-	
-	eval('[ "abc" , "def", "ghi" ]', [ "abc" , "def", "ghi" ])
-	
-	eval('[ [1,"2"], ["a"], [{"1":2, "obj":{}, "arr":[]}]]', [ [1,"2"], ["a"], [ {"1":2, "obj":{}, "arr":[] }]])
-	
-	header("objects")
-	eval('const obj = { "str": "str", "int": 1, "float": 1.4, "obj":{ "hello": "world"} }; obj;', {"str":"str", "int":1, "float": 1.4, "obj": {"hello": "world"}})
-
-	eval('const fn = function() { return 10; }; fn;', 10)
-	
-	eval('const fnobj = { "fn": function() { return 10; }}; fnobj;', {"fn": 10})
-
-	header("wasm")
-	#instantiate empty module
-	eval('''(function(){
-	const bin = new Uint8Array([0,97,115,109,1,0,0,0]);
-	let result = null;
-	try
-	{
-			const module = new WebAssembly.Module(bin);
-			const instance = new WebAssembly.Instance(module);
-			result = ''+module+' '+instance;
-	}
-	catch(ex)
-	{
-		result = ''+ex;
-	}
-	return result;
-	})();
-	//
-	''')
-	# A memset test as described:
-	# https://developer.apple.com/forums/thread/121040
-	inst = eval('''(function(){
-	const bin = new Uint8Array([0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,3,2,1,0,5,3,1,0,1,7,8,1,4,116,101,115,116,0,0,10,16,1,14,0,32,0,65,1,54,2,0,32,0,40,2,0,11]);
-	let result = null;
-	try
-	{
-			const module = new WebAssembly.Module(bin);
-			const instance = new WebAssembly.Instance(module);
-			result = ''+module+' '+instance;
-			result += '\\n'+instance.exports.test(4);
-			return instance;
-	}
-	catch(ex)
-	{
-		result = ''+ex;
-	}
-	return result;
-	})();
-	//
-	''')
-	
-	print(inst.exports.test.is_native)
-	
-	header("context.js interop")
-	header("Create new object", True)
-	print("context.js.interop_obj = { 'test':{'object':[]}, 'int':1, 'double':2.45 }")
-	context.js.interop_obj = { 'test':{'object':[]}, 'int':1, 'double':2.45 }
-	print("Result:", context.js.interop_obj)
-	
-	header("Modify object")
-	print("context.js.interop_obj = { 'test':{'object':[1,2,3]}, 'int':1, 'double':2.45 }")
-	context.js.interop_obj = { 'test':{'object':[1,2,3]}, 'int':1, 'double':2.45 }
-	print("Result:", context.js.interop_obj)
-	
-	header("Create new function")
-	print('"interopfn" in context.js = ', "interopfn" in context.js)
-	print('context.js.interopfn = javascript_function.from_body("function() { return 20; }")')
-	context.js.interopfn = javascript_function.from_source("function() { return 20; }")
-	print('"interopfn" in context.js = ', "interopfn" in context.js)
-	print("Result:",context.js.interopfn, context.js.interopfn())
-	
-	header("Define/Load function")
-	print('"fndeftest" in context.js = ', "fndeftest" in context.js)
-	print('context.eval("function fndeftest() { return 123; }")')
-	context.eval("function fndeftest() { return 123; }")
-	print('"fndeftest" in context.js = ', "fndeftest" in context.js)
-	print("Result:", context.js.fndeftest, context.js.fndeftest())
-	
-	header("Define python functions callable from js")
-	context.js.pythonfn = lambda text: print(text)
-	print("context.js.pythonfn = lambda text: print(text)")
-	print(context.js.pythonfn)
-	print("context.eval('pythonfn(\"Hello python\");')")
-	context.eval('pythonfn("Hello python");')
-	print()
-	context.js.python_val = lambda: {"str": "Hello from python", "num":10, "list":[1,2,3]}
-	print('context.js.python_val = lambda: {"str": "Hello from python", "num":10, "list":[1,2,3]}')
-	print(context.js.python_val)
-	print("context.eval('python_val();')")
-	print(context.eval('python_val();'))
-	
-	header("Python objects")
-	class MyObject:
-		def __init__(self):
-			self.hello = "world"
-	
-	context.js.my_object = MyObject()
-	print(context.js.my_object)
-	
-	header("Promise")
-	p = context.eval("""new Promise((resolve,reject) => { 
-		resolve("resolve");
-	});
-	""").value.then(lambda v: print("then:", v)).catch(lambda e: print("catch:", e))
-	
-	p = context.eval("""new Promise((resolve,reject) => { 
-		reject("reject");
-	});
-	""").value.then(lambda v: print("then:", v)).catch(lambda e: print("catch:", e))
-	
-	p = context.eval("""new Promise((resolve,reject) => { 
-		throw new Error("exception");
-	});
-	""").value.then(lambda v: print("then:", v)).catch(lambda e: print("catch:", e))
-	
-	p = context.eval("""new Promise((resolve,reject) => { 
-		resolve("resolve")
-	});
-	""").value.then(lambda v: print("then:", v)).catch(lambda e: print("catch:", e))["finally"](lambda: print("finally"))
-	
-	p = context.eval("""new Promise((resolve,reject) => { 
-		reject("reject");
-	});
-	""").value.then(lambda v: print("then:", v)).catch(lambda e: print("catch:", e))["finally"](lambda: print("finally"))
-	
-	p = context.eval("""new Promise((resolve,reject) => { 
-		throw new Error("exception");
-	});
-	""").value.then(lambda v: print("then:", v)).catch(lambda e: print("catch:", e))["finally"](lambda: print("finally"))
-	
-	header("Modules/scripts")
-	if Path("./test.js").exists():
-		context.js.print = lambda *v: print(*v)
-		context.eval("""
-		import('file://./test.js').then((x) => {
-			print('mod then');
-			print(x.filetest);
-			return x;
-			}).catch((e) => {
-				print('mod catch');
-				print(e.message);
-			});
-		""").value.then(lambda *v: print("loaded"))
-
-	script_ref = runtime.load_script_ref(source="function script_ref(){ return 232; }; [1, '2', new Date(), script_ref, {'a':[]}];" , url="reftest.js")
-	value, exception = script_ref.eval(context)
-	print(value, exception, context.js.script_ref)
-	context.destroy()
-	runtime.destroy()
-	print(jscore._runtimes)
-	
-	header("wasm runtime")
-	runtime = jscore.runtime(wasm_runtime)
-	context = runtime.context()
-	print(runtime, context)
-	
-	module = wasm_module([0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,3,2,1,0,5,3,1,0,1,7,8,1,4,116,101,115,116,0,0,10,16,1,14,0,32,0,65,1,54,2,0,32,0,40,2,0,11])
-	context.load_module(module)
-	print(module.exports)
-
-	#https://developer.mozilla.org/en-US/docs/WebAssembly/Guides/Using_the_JavaScript_API
-	simple_module_path = Path("./simple.wasm")
-	if simple_module_path.exists():
-		header("simple.wasm")
-		simple_module = wasm_module.from_file("./simple.wasm")
-		simple_module.imports.my_namespace.imported_func = lambda *v: print(*v)
-		context.load_module(simple_module)
-		print(simple_module.exports)
-		simple_module.exports.exported_func()
-
-	context.destroy()
-	runtime.destroy()
-
-	js_context = jscore.js()
-	js_context.js.hello = "javascript"
-	
-	wasm_context = jscore.wasm()
-	print(wasm_context.js.hello)
-	wasm_context.js.hello = "wasm"
-	
-	print(js_context.js.hello)
-	
-	jscore.destroy()
-
+		from wasi_testsuite import wasi_test_runner_main
+		wasi_test_runner_main("-t", test_suite_path + "1", test_suite_path + "3", "-r", test_adapter_path)

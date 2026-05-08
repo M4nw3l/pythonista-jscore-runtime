@@ -4,17 +4,17 @@ requires-python = ">= 3.10"
 dependencies = [
 ]
 authors = [
-    {name = "M4nw3l", email = "63550247+M4nw3l@users.noreply.github.com"},
+	{name = "M4nw3l", email = "63550247+M4nw3l@users.noreply.github.com"},
 ]
 readme = "README.md"
 license = "MIT"
 classifiers = [
 	"Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "Operating System :: iOS",
-    "Programming Language :: Python :: 3",
-    "Topic :: Software Development :: Libraries :: Application Frameworks",
-    "Topic :: Software Development :: Libraries"
+	"Intended Audience :: Developers",
+	"Operating System :: iOS",
+	"Programming Language :: Python :: 3",
+	"Topic :: Software Development :: Libraries :: Application Frameworks",
+	"Topic :: Software Development :: Libraries"
 ]
 dynamic = ["version", "description"]
 
@@ -25,7 +25,12 @@ Homepage = "https://github.com/M4nw3l/pythonista-jscore-runtime"
 name = "jscore_runtime"
 
 [tool.flit.sdist]
-exclude = ["**/.*/"]
+exclude = [
+	"**/.*/",
+	"wasi_test_runner/**/*.*", 
+	"wasi_testsuite/**/*.*",
+	"wasi_testsuite.py"
+]
 
 [build-system]
 requires = ["flit_core >=3.11,<4"]
