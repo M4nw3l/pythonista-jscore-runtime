@@ -296,6 +296,7 @@ Disclaimer: DeepWiki documentation is AI generated, some inaccuracies or incorre
 Further content with more agent guidance and wrangling to attempt to improve this documentations accuracy will be added on-going.
 
 ## Known issues
+- WASI preview 1 and preview 2/3 component model support is a work in progress, it is currently extremely unstable, experimental and incomplete. It should not be considered at all as ready for dev or use currently.
 - Loading javascript files from remote sources / cdns etc is not implemented (yet).
 - Modules and scripts loading may not work correctly for some javascript libraries and they may need manual adjustments to work correctly.
 - ModulesLoaderDelegate is using a private protcol / api as there is no other way to access the functionality otherwise.
