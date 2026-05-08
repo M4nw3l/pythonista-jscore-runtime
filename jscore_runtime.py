@@ -14,9 +14,8 @@ from objc_util import (c, object_getClass, class_getName, objc_getProtocol)
 import weakref
 from datetime import (datetime, timezone)
 from pathlib import Path
-import io, json, os, re, shutil, tempfile, types
+import io, json, os, re, shutil, struct, tempfile, types
 import threading
-
 import logging
 log = logging.getLogger(__name__)
 
@@ -153,8 +152,13 @@ class objc:
 		
 	@staticmethod
 	def protocol_addProperty(protocol, property, required, types = None, instance = None):
-		raise NotImplementedError("TODO: protocol_addProperty")
-		
+		property = property.strip()
+		parts = re.match("(\+|\-)\s+(@property)?\s*(\([A-z0-9=,]*\))?\s*([\(\)\*A-z0-9]+)\s+([A-z0-9]+);", property)
+		attribs = []
+		attribs_count = len(attribs)
+		attribs = objc.c_array_p(attribs)
+		objc.objc_protocol_addProperty(protocol, name, attribs, attribs_count, required, instance)
+
 	@staticmethod
 	def protocol_addProtocol(protocol, parent):
 		objc.objc_protocol_addProtocol(protocol, parent)
@@ -2737,20 +2741,26 @@ class wasm_process_thread(threading.Thread):
 	def __init__(self, process, *args, **kwargs):
 		super().__init__(*args, **kwargs)
 		self.process = process
-		#self.lock = threading.Lock()
-		self.awaiter = threading.Condition()
+		self.lock = threading.RLock()
+		self.awaiter = threading.Condition(self.lock)
 		self.exit_code = None
 		
 	def run(self):
+		self.exit_code = self.process.run()
 		with self.awaiter:
-			self.exit_code = self.process.run()
 			self.awaiter.notify_all()
+			
+	def wait(self, timeout = None, join = False):
+		with self.awaiter:
+			self.awaiter.wait(timeout = timeout)
+		if join:
+			self.join(timeout = timeout)
 
 # represents a lightweight wasm_process which may run as a thread or another execution unit
 # it aims to replicate an interface like subprocess and act as a similar replacement
 # for python code which would interact with a system process which isnt otherwise supported by ios
 class wasm_process:
-	def __init__(self, env, module, args, kwargs):
+	def __init__(self, env, module, args, kwargs, callback = None):
 		self.env = env
 		self.module = module
 		self.args = args
@@ -2759,6 +2769,7 @@ class wasm_process:
 		self.exception = None
 		self.killing = False
 		self.killed = False
+		self.callback = callback
 	
 	@property
 	def exit_code(self):
@@ -2827,11 +2838,19 @@ class wasm_process:
 		self.thread = None
 		if exit_code is not None:
 			self.exit_code = exit_code
+		if self.callback is not None:
+			self.callback(self)
 		return self.exit_code
+		
+	def wait(self, timeout = None, join = False):
+		self.thread.wait(timeout = timeout, join = join)
+		
+	def wait_until_exit(self, timeout = None):
+		self.wait(timeout = timeout, join = True)
 
 class wasm_component:
 	def __init__(self, wasi, env):
-		self._wrap_error_handlers()
+		self._wrap_handlers()
 		self.wasi = wasi
 		self.env = env
 	
@@ -2845,16 +2864,18 @@ class wasm_component:
 	
 	def _error_handler(self, func, func_name, component_type):
 		def error_handler(*args, **kwargs):
-			print(f"call: {func_name}")
 			try:
-				return func(*args, **kwargs)
+				log.debug(f"wasm_component {component_type}.{func_name}: {args} {kwargs}")
+				err = func(*args, **kwargs)
+				if err != 0:
+					log.debug(f"Error code returned from wasm_component {component_type}.{func_name}: {err}")
+				return err
 			except Exception as e:
-				print(e)
 				log.exception(f"Exception in wasm_component {component_type}.{func_name}: {e}")
 				return 1 # we need to return a failure code to wasm if an error or exception is not otherwise handled
 		return error_handler
 	
-	def _wrap_error_handlers(self):
+	def _wrap_handlers(self):
 		class _exclude_members(wasm_component):
 			def __init__(self):
 				pass
@@ -2895,16 +2916,19 @@ class wasi_http(wasm_component):
 class wasi_snapshot_preview1(wasm_component):
 
 	def args_get(self, argv, argv_buf, *args):
-		print("wasi: args_get", argv, argv_buf, args)
+		offset = argv_buf
+		for i in range(len(self.env.args)):
+			self.memory_view.setUint32(argv + 4 * i, offset)
+			arg = self.env.args[i].encode('utf8') + b'\0'
+			arg_len = len(arg)
+			for ii in range(arg_len):
+				self.memory_view.setUint8(offset + ii, arg[ii])
+			offset += arg_len
 		return 0
 
 	def args_sizes_get(self, count, size):
-		print("wasi: args_sizes_get", count, size)
-		
 		self.memory_view.setUint32(count, len(self.env.args))
-		self.memory_view.setUint32(size, len(" ".join(self.env.args))+1)
-		print("count:", self.memory_view.getInt32(count))
-		print("size:", self.memory_view.getInt32(size))
+		self.memory_view.setUint32(size, len("".join(self.env.args))+len(self.env.args))
 		return 0
 
 	def environ_get(self, environ, environ_buf):
@@ -2980,7 +3004,6 @@ class wasi_snapshot_preview1(wasm_component):
 		return 0
 
 	def fd_write(self, fd, ciovs_buf, ciovs_count, ciov_size):
-		print("wasi: fd_write", fd, ciovs_buf, ciovs_count, ciov_size)
 		stream = None
 		if fd == 0:
 			stream = self.env.stdin
@@ -2993,18 +3016,16 @@ class wasi_snapshot_preview1(wasm_component):
 			print("stderr")
 		else:
 			pass
-		print(self.memory_view.buffer)
 		for i in range(int(ciovs_count)):
 			ciov = ciovs_buf + i * ciov_size
 			ptr = self.memory_view.getUint8(ciov)
 			len = self.memory_view.getUint32(ciov+1)
-			print(ptr, len)
 			buffer = []
 			for ii in range(len):
 				b = self.memory_view.getUint8(ptr + ii)
 				buffer.append(b)
 			buffer = bytes(buffer)
-			print(buffer)
+			stream.write(buffer.decode('utf8'))
 		return 0
 
 	def path_create_directory(self, fd, path):
@@ -3077,11 +3098,12 @@ class wasm_memory(javascript_value_base):
 	pass
 
 class wasm_memory_view:
-	def __init__(self, memory, view, littleEndian = True):
+	def __init__(self, memory, view, getter_littleEndian = False, setter_littleEndian = True):
 		self.memory = memory
 		self._view = view
 		self._view_obj = view.jsobject
-		self.littleEndian = littleEndian
+		self.getter_littleEndian = getter_littleEndian
+		self.setter_littleEndian = setter_littleEndian
 	
 	@property
 	def view(self):
@@ -3098,72 +3120,82 @@ class wasm_memory_view:
 	@property
 	def byteOffset(self):
 		return self._view_obj.byteOffset.value
+		
+	def getter_endianess(self, littleEndian = None):
+		if littleEndian is not None:
+			return littleEndian
+		return self.getter_littleEndian
+		
+	def setter_endianess(self, littleEndian = None):
+		if littleEndian is not None:
+			return littleEndian
+		return self.setter_littleEndian
+	
+	def getBigInt64(self, offset, littleEndian = None):
+		return self.view.getBigInt64(offset, self.getter_endianess(littleEndian))
 
-	def getBigInt64(self, offset):
-		return self.view.getBigInt64(offset, self.littleEndian)
+	def setBigInt64(self, offset, value, littleEndian = None):
+		self.view.setBigInt64(offset, value, self.setter_endianess(littleEndian))
 
-	def setBigInt64(self, offset, value):
-		self.view.setBigInt64(offset, value, self.littleEndian)
+	def getBigUint64(self, offset, littleEndian = None):
+		return self.view.getBigUint64(offset, self.getter_endianess(littleEndian))
 
-	def getBigUint64(self, offset):
-		return self.view.getBigUint64(offset, self.littleEndian)
+	def setBigUint64(self, offset, value, littleEndian = None):
+		return self.view.setBigUint64(offset, value, self.setter_endianess(littleEndian))
 
-	def setBigUint64(self, offset, value):
-		return self.view.setBigUint64(offset, value, self.littleEndian)
+	def getFloat16(self, offset, littleEndian = None):
+		return self.view.getFloat16(offset, self.getter_endianess(littleEndian))
 
-	def getFloat16(self, offset):
-		return self.view.getFloat16(offset, self.littleEndian)
+	def setFloat16(self, offset, value, littleEndian = None):
+		return self.view.setFloat16(offset, value, self.setter_endianess(littleEndian))
 
-	def setFloat16(self, offset, value):
-		return self.view.setFloat16(offset, value, self.littleEndian)
+	def getFloat32(self, offset, littleEndian = None):
+		return self.view.getFloat32(offset, self.getter_endianess(littleEndian))
 
-	def getFloat32(self, offset):
-		return self.view.getFloat32(offset, self.littleEndian)
+	def setFloat32(self, offset, value, littleEndian = None):
+		return self.view.setFloat32(offset, value, self.setter_endianess(littleEndian))
 
-	def setFloat32(self, offset, value):
-		return self.view.setFloat32(offset, value, self.littleEndian)
+	def getFloat64(self, offset, littleEndian = None):
+		return self.view.getFloat64(offset, self.getter_endianess(littleEndian))
 
-	def getFloat64(self, offset):
-		return self.view.getFloat64(offset, self.littleEndian)
-
-	def setFloat64(self, offset, value):
-		return self.view.setFloat64(offset, value, self.littleEndian)
+	def setFloat64(self, offset, value, littleEndian = None):
+		return self.view.setFloat64(offset, value, self.setter_endianess(littleEndian))
 
 	def getInt8(self, offset):
-		return self.view.getInt8(offset, self.littleEndian)
+		return self.view.getInt8(offset)
 
 	def setInt8(self, offset, value):
-		return self.view.setInt8(offset, value, self.littleEndian)
+		return self.view.setInt8(offset, value)
 
-	def getInt16(self, offset):
-		return self.view.getInt16(offset, self.littleEndian)
+	def getInt16(self, offset, littleEndian = None):
+		return self.view.getInt16(offset, self.getter_endianess(littleEndian))
 
-	def setInt16(self, offset, value):
-		return self.view.setInt16(offset, value, self.littleEndian)
+	def setInt16(self, offset, value, littleEndian = None):
+		return self.view.setInt16(offset, value, self.setter_endianess(littleEndian))
 		
-	def getInt32(self, offset):
-		return self.view.getInt32(offset, self.littleEndian)
+	def getInt32(self, offset, littleEndian = None):
+		return self.view.getInt32(offset, self.getter_endianess(littleEndian))
 
-	def setInt32(self, offset, value):
-		return self.view.setInt32(offset, value, self.littleEndian)
+	def setInt32(self, offset, value, littleEndian = None):
+		return self.view.setInt32(offset, value, self.setter_endianess(littleEndian))
 		
 	def getUint8(self, offset):
-		return self.view.getUint8(offset, self.littleEndian)
+		return self.view.getUint8(offset)
 
 	def setUint8(self, offset, value):
-		return self.view.setUint8(offset, value, self.littleEndian)
+		return self.view.setUint8(offset, value)
 		
-	def getUint16(self, offset):
-		return self.view.getUint16(offset, self.littleEndian)
+	def getUint16(self, offset, littleEndian = None):
+		return self.view.getUint16(offset, self.getter_endianess(littleEndian))
 
-	def setUint16(self, offset, value):
-		return self.view.setUint16(offset, value, self.littleEndian)
+	def setUint16(self, offset, value, littleEndian = None):
+		return self.view.setUint16(offset, value, self.setter_endianess(littleEndian))
 
-	def getUint32(self, offset):
-		return self.view.getUint32(offset, self.littleEndian)
+	def getUint32(self, offset, littleEndian = None):
+		return self.view.getUint32(offset, self.getter_endianess(littleEndian))
 
-	def setUint32(self, offset, value):
-		return self.view.setUint32(offset, value, self.littleEndian)
+	def setUint32(self, offset, value, littleEndian = None):
+		return self.view.setUint32(offset, value, self.setter_endianess(littleEndian))
 
 class wasm_env:
 	def __init__(self, parent = None, vars = {}, args = [], kwargs = {}, memory_factory = None, memory_view_factory = None):
@@ -3235,6 +3267,8 @@ class wasm_context(jscore_context):
 		self._namespace = wasm_namespace(self._imports)
 		self._env = wasm_env()
 		self._wasi = wasm_wasi(self, self._env)
+		self._lock = threading.RLock()
+		self._processes = {}
 		
 	def allocate(self):
 		super().allocate()
@@ -3263,6 +3297,11 @@ class wasm_context(jscore_context):
 			};})();""").value
 		
 	def deallocate(self):
+		while len(self._processes) > 0:
+			with self._lock:
+				processes = list(self._processes.keys())
+			for process in processes:
+				process.wait_until_exit()
 		deallocating = True
 		for name,module in self._modules.items():
 			module.free()
@@ -3405,17 +3444,20 @@ class wasm_context(jscore_context):
 		memory_view_factory = lambda memory: self._loader.memory_view_create.call(memory)
 		env = wasm_env(self._env, env_vars, args, kwargs, memory_factory, memory_view_factory)
 		module = self.load_module(module, env = env)
-		process = wasm_process(env, module, args, kwargs)
-		return process
+		def _cleanup(p):
+			del self._processes[p]
+		process = wasm_process(env, module, args, kwargs, _cleanup)
+		self._processes[process] = process
+		return process, module_path
 	
 	def run(self, module, *args, **kwargs):
 		# wasm/wasi synchronous run, this runs the given module/program on the current thread until termination
-		process = self.new_process(module, *args, **kwargs)
+		process, module_path = self.new_process(module, *args, **kwargs)
 		return process.run()
 
 	def run_async(self, module, *args, **kwargs):
 		# wasm/wasi asynchronous run, this runs the given module/program on a new thread until termination
-		process = self.new_process(module, *args, **kwargs)
+		process, module_path = self.new_process(module, *args, **kwargs)
 		return process.run_async()
 		
 	def serve(self, path, *args, **kwargs):
@@ -3440,7 +3482,8 @@ if __name__ == '__main__':
 
 	run_tests = False
 	run_wasi_tests = True
-	
+	log.setLevel(logging.DEBUG)
+	logging.basicConfig(level = logging.DEBUG)
 	if run_tests:
 
 		runtime = jscore.runtime()
