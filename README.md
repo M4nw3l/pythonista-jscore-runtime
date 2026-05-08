@@ -46,6 +46,8 @@ module.exports.exported_func()
 
 Install with pip using [StaSh](https://github.com/ywangd/stash).
 
+Or install with pip using pipTerminal with [Pythonista pip configration tool](https://github.com/CrossDarkrix/Pythonista3_pip_Configration_Tool/blob/main/README_EN.md).
+
 ```bash
 pip install pythonista-jscore-runtime 
 ```
