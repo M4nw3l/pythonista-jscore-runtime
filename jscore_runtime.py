@@ -14,7 +14,7 @@ from objc_util import (c, object_getClass, class_getName, objc_getProtocol)
 import weakref
 from datetime import (datetime, timezone)
 from pathlib import Path
-import io, json, os, re, shutil, struct, tempfile, types
+import enum, io, json, os, re, secrets, shutil, struct, sys, tempfile, types
 import threading
 import logging
 log = logging.getLogger(__name__)
@@ -152,12 +152,13 @@ class objc:
 		
 	@staticmethod
 	def protocol_addProperty(protocol, property, required, types = None, instance = None):
-		property = property.strip()
-		parts = re.match("(\+|\-)\s+(@property)?\s*(\([A-z0-9=,]*\))?\s*([\(\)\*A-z0-9]+)\s+([A-z0-9]+);", property)
-		attribs = []
-		attribs_count = len(attribs)
-		attribs = objc.c_array_p(attribs)
-		objc.objc_protocol_addProperty(protocol, name, attribs, attribs_count, required, instance)
+		#property = property.strip()
+		#parts = re.match("(\+|\-)\s+(@property)?\s*(\([A-z0-9=,]*\))?\s*([\(\)\*A-z0-9]+)\s+([A-z0-9]+);", property)
+		#attribs = []
+		#attribs_count = len(attribs)
+		#attribs = objc.c_array_p(attribs)
+		#objc.objc_protocol_addProperty(protocol, name, attribs, attribs_count, required, instance)
+		raise NotImplementedError()
 
 	@staticmethod
 	def protocol_addProtocol(protocol, parent):
@@ -1350,7 +1351,6 @@ class javascript_value_base:
 		
 
 class jsvalue_accessor(javascript_value_base):
-
 	def __iter__(self):
 		self.___keys___ = jscore.jsobject_get_keys(~self)
 		self.___keys___ = iter(self.___keys___)
@@ -2769,7 +2769,10 @@ class wasm_process:
 		self.exception = None
 		self.killing = False
 		self.killed = False
+		self.running = False
 		self.callback = callback
+		self.lock = threading.RLock()
+		self.awaiter = threading.Condition(self.lock)
 	
 	@property
 	def exit_code(self):
@@ -2803,18 +2806,26 @@ class wasm_process:
 		_start = self.module.exports._start
 		if not javascript_value.is_null_or_undefined(_start):
 			try:
+				self.running = True
 				exit_code = _start()
 				if javascript_value.is_null_or_undefined(exit_code):
-					exit_code = 0
+					exit_code = None
 				return self._terminated(exit_code)
 			except Exception as e:
+				self.exception = None
 				if self.exit_code is None:
 					exit_code = -1 # exited with exception
-					if not (self.killing or self.killed):
-						self.exception = e
-				log.exception(f"wasm_process terminated unexpectedly, exception: {e}")
+				if not (self.killing or self.killed):
+					self.exception = e
+				if self.exit_code is None:
+					if self.exception is not None:
+						log.exception(f"wasm_process terminated unexpectedly, exception: {e}")
 		else:
-			exit_code = -1 # no entry point 
+			exit_code = -2 # no entry point
+			try:
+				raise ImportError(f"wasm_process execution failed, entry point _start not found in module {self.module.path}.")
+			except ImportError as e:
+				log.exception(f"{e}")
 		return self._terminated(exit_code)
 	
 	def run_async(self):
@@ -2824,10 +2835,19 @@ class wasm_process:
 		self.thread.start()
 		return self
 
-	def communicate(self, input = None, stdin = None, timeout = None):
-		if self.thread is not None: # this needs to perform a stdin/out pump loop
-			self.thread.join(timeout=timeout)
+	def communicate(self, stdin = None, timeout = None):
+		if isinstance(stdin, str):
+			self.stdin.write(input)
+		self.wait_until_exit(timeout = timeout)
 		return self.stdout.getvalue(), self.stderr.getvalue()
+		
+	def notify(self):
+		with self.awaiter:
+			self.awaiter.notify()
+			
+	def notify_all(self):
+		with self.awaiter:
+			self.awaiter.notify_all()
 
 	def kill(self, *args, **kwargs):
 		self.killing = True
@@ -2835,6 +2855,7 @@ class wasm_process:
 		# this needs to actually kill the thread
 	
 	def _terminated(self, exit_code = None):
+		self.running = False
 		self.thread = None
 		if exit_code is not None:
 			self.exit_code = exit_code
@@ -2843,10 +2864,39 @@ class wasm_process:
 		return self.exit_code
 		
 	def wait(self, timeout = None, join = False):
-		self.thread.wait(timeout = timeout, join = join)
+		if self.thread is not None:
+			self.thread.wait(timeout = timeout, join = join)
 		
 	def wait_until_exit(self, timeout = None):
 		self.wait(timeout = timeout, join = True)
+		
+	def send_signal(self, sig):
+		print(sig)
+
+class wasm_io(io.StringIO):
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.awaiter = threading.Condition(threading.Lock())
+		self.read_count = 0
+		self.write_count = 0
+		
+	def read(self, *args, **kwargs):
+		count = self.write_count
+		with self.awaiter:
+			while count == self.write_count:
+				self.awaiter.wait()
+			data = super().read(*args, **kwargs)
+			self.read_count += 1
+			return data
+		
+	def write(self, *args, **kwargs):
+		with self.awaiter:
+			cookie = self.tell()
+			written = super().write(*args, **kwargs)
+			self.seek(cookie)
+			self.write_count += 1
+			self.awaiter.notify()
+			return written
 
 class wasm_component:
 	def __init__(self, wasi, env):
@@ -2865,14 +2915,21 @@ class wasm_component:
 	def _error_handler(self, func, func_name, component_type):
 		def error_handler(*args, **kwargs):
 			try:
-				log.debug(f"wasm_component {component_type}.{func_name}: {args} {kwargs}")
+				log.debug(f"call wasm_component {component_type}.{func_name}: {args} {kwargs}")
 				err = func(*args, **kwargs)
-				if err != 0:
-					log.debug(f"Error code returned from wasm_component {component_type}.{func_name}: {err}")
+				if err is None:
+					err = wasi_err.success
+				else:
+					err = wasi_err(err)
+				log.debug(f"return wasm_component {component_type}.{func_name}: {err.name}, {err}")
 				return err
 			except Exception as e:
-				log.exception(f"Exception in wasm_component {component_type}.{func_name}: {e}")
-				return 1 # we need to return a failure code to wasm if an error or exception is not otherwise handled
+				err = wasi_err.fault
+				if isinstance(e, wasi_error):
+					err = e.err
+					e = e.ex
+				log.exception(f"Exception in wasm_component {component_type}.{func_name}: {err.name}, {err} {e}")
+				return err # we need to return a failure code to wasm if an error or exception is not otherwise handled
 		return error_handler
 	
 	def _wrap_handlers(self):
@@ -2886,7 +2943,93 @@ class wasm_component:
 			if callable(attr):
 				setattr(self, attr_name, self._error_handler(attr, attr_name, component_type))
 
-		
+# common
+class wasi_err(enum.IntEnum):
+	success = 0 #;;; No error occurred. System call completed successfully.
+	toobig = enum.auto() #;;; Argument list too long.
+	acces = enum.auto()  #;;; Permission denied.
+	addrinuse = enum.auto() #;;; Address in use.
+	addrnotavail = enum.auto() #;;; Address not available.
+	afnosupport = enum.auto() #;;; Address family not supported.
+	again = enum.auto() #;;; Resource unavailable, or operation would block.
+	already = enum.auto() #;;; Connection already in progress.
+	badf = enum.auto() #;;; Bad file descriptor.
+	badmsg = enum.auto() #;;; Bad message.
+	busy = enum.auto() #;;; Device or resource busy.
+	canceled = enum.auto() #;;; Operation canceled.
+	child = enum.auto() #;;; No child processes.
+	connaborted = enum.auto() #;;; Connection aborted.
+	connrefused = enum.auto() #;;; Connection refused.
+	connreset = enum.auto() #;;; Connection reset.
+	deadlk = enum.auto() #;;; Resource deadlock would occur.
+	destaddrreq = enum.auto() #;;; Destination address required.
+	dom = enum.auto() #;;; Mathematics argument out of domain of function.
+	dquot = enum.auto() #;;; Reserved.
+	exist = enum.auto() #;;; File exists.
+	fault = enum.auto() #;;; Bad address.
+	fbig = enum.auto() #;;; File too large.
+	hostunreach = enum.auto() #;;; Host is unreachable.
+	idrm = enum.auto() #;;; Identifier removed.
+	ilseq = enum.auto() #;;; Illegal byte sequence.
+	inprogress = enum.auto() #;;; Operation in progress.
+	intr = enum.auto() #;;; Interrupted function.
+	inval = enum.auto() #;;; Invalid argument.
+	io = enum.auto() #;;; I/O error.
+	isconn = enum.auto() #;;; Socket is connected.
+	isdir = enum.auto() #;;; Is a directory.
+	loop = enum.auto() #;;; Too many levels of symbolic links.
+	mfile = enum.auto() #;;; File descriptor value too large.
+	mlink = enum.auto() #;;; Too many links.
+	msgsize = enum.auto() #;;; Message too large.
+	multihop = enum.auto() #;;; Reserved.
+	nametoolong = enum.auto() #;;; Filename too long.
+	netdown = enum.auto() #;;; Network is down.
+	netreset = enum.auto() #;;; Connection aborted by network.
+	netunreach = enum.auto() #;;; Network unreachable.
+	nfile = enum.auto() #;;; Too many files open in system.
+	nobufs = enum.auto() #;;; No buffer space available.
+	nodev = enum.auto() #;;; No such device.
+	noent = enum.auto() #;;; No such file or directory.
+	noexec = enum.auto() #;;; Executable file format error.
+	nolck = enum.auto() #;;; No locks available.
+	nolink = enum.auto() #;;; Reserved.
+	nomem = enum.auto() #;;; Not enough space.
+	nomsg = enum.auto() #;;; No message of the desired type.
+	noprotoopt = enum.auto() #;;; Protocol not available.
+	nospc = enum.auto() #;;; No space left on device.
+	nosys = enum.auto() #;;; Function not supported.
+	notconn = enum.auto() #;;; The socket is not connected.
+	notdir = enum.auto() #;;; Not a directory or a symbolic link to a directory.
+	notempty = enum.auto() #;;; Directory not empty.
+	notrecoverable = enum.auto() #;;; State not recoverable.
+	notsock = enum.auto() #;;; Not a socket.
+	notsup = enum.auto() #;;; Not supported, or operation not supported on socket.
+	notty = enum.auto() #;;; Inappropriate I/O control operation.
+	nxio = enum.auto() #;;; No such device or address.
+	overflow = enum.auto() #;;; Value too large to be stored in data type.
+	ownerdead = enum.auto() #;;; Previous owner died.
+	perm = enum.auto() #;;; Operation not permitted.
+	pipe = enum.auto() #;;; Broken pipe.
+	proto = enum.auto() #;;; Protocol error.
+	protonosupport = enum.auto() #;;; Protocol not supported.
+	prototype = enum.auto() #;;; Protocol wrong type for socket.
+	range = enum.auto() #;;; Result too large.
+	rofs = enum.auto() #;;; Read-only file system.
+	spipe = enum.auto() #;;; Invalid seek.
+	srch = enum.auto() #;;; No such process.
+	stale = enum.auto() #;;; Reserved.
+	timedout = enum.auto() #;;; Connection timed out.
+	txtbsy = enum.auto() #;;; Text file busy.
+	xdev = enum.auto() #;;; Cross-device link.
+	notcapable = enum.auto() # ;;; Extension: Capabilities insufficient.
+	
+class wasi_error(Exception):
+	def __init__(self, ex, err = None):
+		self.ex = ex
+		self.err = err
+		if self.err is None:
+			self.err = wasi_err.notrecoverable
+
 # https://github.com/WebAssembly/WASI/blob/v0.2.11/docs/Preview2.md
 class wasi_io(wasm_component):
 	pass
@@ -2915,177 +3058,176 @@ class wasi_http(wasm_component):
 # preview0: wasi_unstable, snapshot_0
 class wasi_snapshot_preview1(wasm_component):
 
-	def args_get(self, argv, argv_buf, *args):
+	def args_get(self, argv, argv_buf):
 		offset = argv_buf
 		for i in range(len(self.env.args)):
 			self.memory_view.setUint32(argv + 4 * i, offset)
-			arg = self.env.args[i].encode('utf8') + b'\0'
-			arg_len = len(arg)
-			for ii in range(arg_len):
-				self.memory_view.setUint8(offset + ii, arg[ii])
-			offset += arg_len
-		return 0
+			offset = self.memory_view.setString(offset, self.env.args[i])
 
 	def args_sizes_get(self, count, size):
 		self.memory_view.setUint32(count, len(self.env.args))
 		self.memory_view.setUint32(size, len("".join(self.env.args))+len(self.env.args))
-		return 0
 
 	def environ_get(self, environ, environ_buf):
-		return 0
+		offset = environ_buf
+		i = 0
+		for k, v in self.env.vars.items():
+			self.memory_view.setUint32(environ + 4 * i, offset)
+			offset = self.memory_view.setString(offset, f"{k}={v}")
+			i += 1
 
-	def environ_sizes_get(self):
-		return 0
+	def environ_sizes_get(self, count, size):
+		self.memory_view.setUint32(count, len(self.env.vars))
+		sz = 0
+		for k,v in self.env.vars.items():
+			sz += len(k) + len(v) + 2 # 2 bytes for = and zero terminator
+		self.memory_view.setUint32(size, sz)
 
 	def clock_res_get(self, id):
-		return 0
+		return wasi_err.notcapable
 
 	def clock_time_get(self, id, precision):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_advise(self, fd, offset, len, advice):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_allocate(self, fd, offset, len):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_close(self, fd):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_datasync(self, fd):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_fdstat_get(self, fd):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_fdstat_set_flags(self, fd, flags):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_fdstat_set_rights(self, fd, fs_rights_base, fs_rights_inheriting):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_filestat_get(self, fd):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_filestat_set_size(self, fd, size):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_filestat_set_times(self, fd, atim, mtim, fst_flags):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_pread(self, fd, iovs, offset):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_prestat_get(self, fd):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_prestat_dir_name(self, fd, path, pathlen):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_pwrite(self, fd, iovs, offset):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_read(self, fd, iovs):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_readdir(self, fd, buf, buf_len, cookie):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_renumber(self, fd, to):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_seek(self, fd, offset, whence):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_sync(self, fd):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_tell(self, fd):
-		return 0
+		return wasi_err.notcapable
 
 	def fd_write(self, fd, ciovs_buf, ciovs_count, ciov_size):
-		stream = None
-		if fd == 0:
-			stream = self.env.stdin
-			print("stdin")
-		elif fd == 1:
-			stream = self.env.stdout
-			print("stdout")
-		elif fd == 2:
-			stream = self.env.stderr
-			print("stderr")
-		else:
-			pass
+		stream = self.env.get_stream(fd)
+		if stream is None:
+			return wasi_err.badf
+		written = 0
+		iov = fd != 2 and ciovs_count == 1
 		for i in range(int(ciovs_count)):
-			ciov = ciovs_buf + i * ciov_size
-			ptr = self.memory_view.getUint8(ciov)
-			len = self.memory_view.getUint32(ciov+1)
-			buffer = []
-			for ii in range(len):
-				b = self.memory_view.getUint8(ptr + ii)
-				buffer.append(b)
-			buffer = bytes(buffer)
-			stream.write(buffer.decode('utf8'))
-		return 0
+			ciov = ciovs_buf + (i * 8)
+			ptr = self.memory_view.getUint32(ciov)
+			size = self.memory_view.getUint32(ciov+4)
+			text = self.memory_view.getString(ptr, size)
+			stream.write(text)
+			written += size
+		self.memory_view.setUint32(ciov_size, written)
+		self.env.notify()
 
 	def path_create_directory(self, fd, path):
-		return 0
+		return wasi_err.notcapable
 
 	def path_filestat_get(self, fd, flags, path):
-		return 0
+		return wasi_err.notcapable
 
 	def path_filestat_set_times(self, fd, flags, path, atim, mtim, fst_flags):
-		return 0
+		return wasi_err.notcapable
 
 	def path_link(self, old_fd, old_flags, old_path, new_fd, new_path):
-		return 0
+		return wasi_err.notcapable
 
 	def path_open(self, fd, dirflags, path, oflags, fs_rights_base, fs_rights_inheriting, fdflags):
-		return 0
+		return wasi_err.notcapable
 
 	def path_readlink(self, fd, path, buf, buf_len):
-		return 0
+		return wasi_err.notcapable
 
 	def path_remove_directory(self, fd, path):
-		return 0
+		return wasi_err.notcapable
 
 	def path_rename(self, fd, old_path, new_fd, new_path):
-		return 0
+		return wasi_err.notcapable
 
 	def path_symlink(self, old_path, fd, new_path):
-		return 0
+		return wasi_err.notcapable
 
 	def path_unlink_file(self, fd, path):
-		return 0
+		return wasi_err.notcapable
 		
 	def poll_oneoff(self, events_in, events_out, nsubscriptions):
-		return 0
+		return wasi_err.notcapable
 
 	def proc_exit(self, rval):
-		print("wasi: proc_exit", rval)
 		self.env.exit_code = int(rval)
-		return 0
 
 	def proc_raise(self, sig):
-		return 0
+		return wasi_err.notcapable
 
 	def sched_yield(self):
-		return 0
+		return wasi_err.notcapable
 
 	def random_get(self, buf, buf_len):
-		return 0
+		buf_len = int(buf_len)
+		if buf_len < 0:
+			return wasi_err.inval
+		if buf_len == 0:
+			return wasi_err.success
+		data = secrets.token_bytes(buf_len)
+		for i in range(buf_len):
+			self.memory_view.setUint8(buf+i, data[i])
 
 	def sock_accept(self, fd, flags):
-		return 0
+		return wasi_err.notcapable
 
 	def sock_recv(self, fd, ri_data, ri_flags):
-		return 0
+		return wasi_err.notcapable
 
 	def sock_send(self, fd, si_data, si_flags):
-		return 0
+		return wasi_err.notcapable
 
 	def sock_shutdown(self, fd, how):
-		return 0
+		return wasi_err.notcapable
 
 class wasm_wasi:
 	def __init__(self, context, env):
@@ -3098,10 +3240,15 @@ class wasm_memory(javascript_value_base):
 	pass
 
 class wasm_memory_view:
-	def __init__(self, memory, view, getter_littleEndian = False, setter_littleEndian = True):
+	def __init__(self, memory, view, getter_littleEndian = None, setter_littleEndian = None):
 		self.memory = memory
 		self._view = view
 		self._view_obj = view.jsobject
+		self.system_littleEndian = sys.byteorder == "little"
+		if getter_littleEndian is None:
+			getter_littleEndian = self.system_littleEndian
+		if setter_littleEndian is None:
+			setter_littleEndian = self.system_littleEndian
 		self.getter_littleEndian = getter_littleEndian
 		self.setter_littleEndian = setter_littleEndian
 	
@@ -3196,24 +3343,70 @@ class wasm_memory_view:
 
 	def setUint32(self, offset, value, littleEndian = None):
 		return self.view.setUint32(offset, value, self.setter_endianess(littleEndian))
+	
+	max_string = 2048
+	def getString(self, offset, length, littleEndian = None):
+		buffer = []
+		max_string = wasm_memory_view.max_string
+		try:
+			for i in range(min(length, max_string)):
+				b = self.getUint8(offset + i)
+				if b == 0 and length > max_string:
+					break # zero termination?
+				buffer.append(b)
+		except Exception as e:
+			log.warning(f"wasm_memory_view.getString failed. {e}\ptr: {offset}, size: {length}, read: {len(buffer)}, buffer: {bytes(buffer)}")
+			raise wasi_error(e, wasi_err.fault)
+		try:
+			buffer = bytes(buffer)
+			return buffer.decode('utf8')
+		except Exception as e:
+			log.warning(f"wasm_memory_view.getString failed. {e}\ptr: {offset}, size: {length}, read: {len(buffer)}, buffer: {bytes(buffer)}")
+			raise wasi_error(e, wasi_err.ilseq)
+
+	def setString(self, offset, value, littleEndian = None):
+		data = value.encode('utf8') + b'\0'
+		data_len = len(data)
+		for i in range(data_len):
+			self.setUint8(offset + i, data[i])
+		return offset + data_len
 
 class wasm_env:
-	def __init__(self, parent = None, vars = {}, args = [], kwargs = {}, memory_factory = None, memory_view_factory = None):
+	def __init__(self, parent = None, args = [], kwargs = {}, memory_factory = None, memory_view_factory = None):
 		self.parent = parent # parent wasm env
-		self.vars = vars
 		self.args = args
 		self.kwargs = kwargs
-		self.dirs = {}
+		self._vars = kwargs.get("env", {})
+		self._dirs = kwargs.get("dirs", [])
+		self.world = kwargs.get("world", None)
+		self.version = kwargs.get("version", None)
 		self._exit_code = None
-		self.stdin = io.StringIO()
-		self.stdout = io.StringIO()
-		self.stderr = io.StringIO()
+		self.stdin = kwargs.get("stdin")
+		if self.stdin is None:
+			self.stdin = wasm_io()
+		self.stdout = kwargs.get("stdout")
+		if self.stdout is None:
+			self.stdout = wasm_io()
+		self.stderr = kwargs.get("stderr")
+		if self.stderr is None:
+			self.stderr = wasm_io()
 		self._memory_factory = memory_factory
 		self._memory_view_factory = memory_view_factory
 		self._memory = None
 		self._memory_view = None
 		self._components = None
+		self._fds = {}
+		self._streams = {}
+		self._process = None
+
+	@property
+	def vars(self):
+		return self._vars
 		
+	@property
+	def dirs(self):
+		return self._dirs
+
 	@property
 	def exit_code(self):
 		return self._exit_code
@@ -3258,6 +3451,30 @@ class wasm_env:
 	
 	def preopen(self, dir):
 		pass
+	
+	def get_fd(self, fd):
+		return int(fd)
+	
+	def get_stream(self, fd):
+		fd = self.get_fd(fd)
+		if fd == 0:
+			return self.stdin
+		elif fd == 1:
+			return self.stdout
+		elif fd == 2:
+			return self.stderr
+		return self._streams.get(fd)
+		
+	@property
+	def process(self):
+		return self._process
+		
+	@process.setter
+	def process(self, value):
+		self._process = value
+		
+	def notify(self):
+		self.process.notify()
 
 class wasm_context(jscore_context):
 	def __init__(self, runtime, context = None):
@@ -3295,7 +3512,7 @@ class wasm_context(jscore_context):
 				return new DataView(wasm_memory.buffer);
 			},
 			};})();""").value
-		
+
 	def deallocate(self):
 		while len(self._processes) > 0:
 			with self._lock:
@@ -3435,18 +3652,22 @@ class wasm_context(jscore_context):
 			env.memory = memory
 		return module_instance.value, name
 	
-	# creates a wasm_process which runs with this context
+	# creates a wasm_process which runs with this context, 
+	# module: path to .wasm file or wasm_module, args: command line args
+	# kwargs defaults:
+	#	env = {}, dirs = [], world = None, version = None, 
+	# stdin = io.StringIO(), stdout = io.StringIO(), stderr = io.StringIO()
 	def new_process(self, module, *args, **kwargs):
-		env_vars = {}
 		module_path = str(wasm_module.get_module_file_path(module))
 		args = ( module_path, ) + args
 		memory_factory = lambda: self._loader.memory_create.call({ "initial": 1 })
 		memory_view_factory = lambda memory: self._loader.memory_view_create.call(memory)
-		env = wasm_env(self._env, env_vars, args, kwargs, memory_factory, memory_view_factory)
-		module = self.load_module(module, env = env)
+		module_env = wasm_env(self._env, args, kwargs, memory_factory, memory_view_factory)
+		module = self.load_module(module, env = module_env)
 		def _cleanup(p):
 			del self._processes[p]
-		process = wasm_process(env, module, args, kwargs, _cleanup)
+		process = wasm_process(module_env, module, args, kwargs, _cleanup)
+		module_env.process = process
 		self._processes[process] = process
 		return process, module_path
 	
@@ -3817,3 +4038,5 @@ if __name__ == '__main__':
 	
 		from wasi_testsuite import wasi_test_runner_main
 		wasi_test_runner_main("-t", test_suite_path + "1", test_suite_path + "3", "-r", test_adapter_path)
+		
+
