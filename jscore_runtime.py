@@ -14,7 +14,7 @@ from objc_util import (c, object_getClass, class_getName, objc_getProtocol)
 import weakref
 from datetime import (datetime, timezone)
 from pathlib import Path
-import enum, io, json, os, re, secrets, shutil, struct, sys, tempfile, types
+import enum, io, json, os, re, secrets, shutil, struct, sys, tempfile, time, types
 import threading
 import logging
 log = logging.getLogger(__name__)
@@ -1049,6 +1049,9 @@ class jscore:
 		if cls.JSValueIsNumber(context_ref, value_ref):
 			ex = c_void_p(None)
 			return cls.JSValueToNumber(context_ref, value_ref, byref(ex))
+		if cls.JSValueIsBigInt(context_ref, value_ref):
+			ex = c_void_p(None)
+			return cls.JSValueToInt64(context_ref, value_ref, byref(ex))
 		if cls.JSValueIsString(context_ref, value_ref):
 			ex = c_void_p(None)
 			str_ref = cls.JSValueToStringCopy(context_ref, value_ref, byref(ex))
@@ -1085,6 +1088,8 @@ class jscore:
 		if objc.ns_subclass_of(value, cls.JSScript):
 			raise Exception("JSScript")
 		# convert
+		if isinstance(value, javascript_value_converter):
+			return value.to_jsvalueref(context_ref)
 		if isinstance(value, bool):
 			return cls.JSValueMakeBoolean(context_ref, value)
 		if isinstance(value, int) or isinstance(value, float):
@@ -1174,6 +1179,8 @@ class jscore:
 			return cls.JSValue.valueWithUndefinedInContext_(context)
 		if objc.ns_subclass_of(value, jscore.JSValue) or objc.ns_subclass_of(value, jscore.JSScript):
 			return value # pass back jsvalue instances as-is
+		if isinstance(value, javascript_value_converter):
+			return value.to_jsvalue(context)
 		if isinstance(value, bool):
 			return cls.JSValue.valueWithBool_inContext_(value, context)
 		if isinstance(value, int) or isinstance(value, float) or isinstance(value, str):
@@ -1446,6 +1453,60 @@ class javascript_value(javascript_value_base):
 		
 	def __invert__(self):
 		return self.jsvalue
+
+class javascript_value_converter:
+	def __init__(self, value):
+		self.value = value
+		
+	def to_jsvalue(self, context):
+		raise NotImplementedError()
+		
+	def to_jsvalueref(self, context_ref):
+		raise NotImplementedError()
+	
+class javascript_bigint(javascript_value_converter):
+	def to_jsvalue(self, context):
+		value = self.value
+		if isinstance(value, str):
+			return jscore.JSValue.valueWithNewBigIntFromString_inContext_(ns(value), context)
+		elif isinstance(value, float):
+			value = round(value)
+			return jscore.JSValue.valueWithNewBigIntFromDouble_inContext_(c_double(value), context)
+		return jscore.JSValue.valueWithNewBigIntFromInt64_inContext_(c_int64(value), context)
+		
+	def to_jsvalueref(self, context_ref):
+		value = self.value
+		ex = c_void_p(None)
+		jsvalue_ref = None
+		if isinstance(value, str):
+			str_ref = jscore.str_to_jsstringref(value)
+			jsvalue_ref = jscore.JSBigIntCreateWithString(context_ref, str_ref, byref(ex))
+		elif isinstance(value, float):
+			value = round(value)
+			jsvalue_ref = jscore.JSBigIntCreateWithDouble(context_ref, c_double(value), byref(ex))
+		else:
+			jsvalue_ref = jscore.JSBigIntCreateWithInt64(context_ref, c_int64(value), byref(ex))
+		if jsvalue_ref is None and ex is not None:
+			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
+		return jsvalue_ref
+
+
+class javascript_biguint(javascript_bigint):
+	def to_jsvalue(self, context):
+		value = self.value
+		if isinstance(value, int):
+			return jscore.JSValue.valueWithNewBigIntFromUInt64_inContext_(c_uint64(value), context)
+		return super().to_jsvalue(context)
+		
+	def to_jsvalueref(self, context_ref):
+		value = self.value
+		ex = c_void_p(None)
+		if isinstance(value, int):
+			jsvalue_ref = jscore.JSBigIntCreateWithUInt64(context_ref, c_uint64(value), byref(ex))
+			if jsvalue_ref is None and ex is not None:
+				raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
+			return jsvalue_ref
+		return super().to_jsvalueref(context_ref)
 
 class javascript_list(list):
 	def __getitem__(self, index):
@@ -3025,10 +3086,77 @@ class wasi_err(enum.IntEnum):
 	
 class wasi_error(Exception):
 	def __init__(self, ex, err = None):
+		if isinstance(ex, wasi_err):
+			err = ex
+			ex = None
 		self.ex = ex
 		self.err = err
 		if self.err is None:
 			self.err = wasi_err.notrecoverable
+
+class wasi_clockid(enum.IntEnum):
+	#;;; The clock measuring real time. Time value zero corresponds with 1970-01-01T00:00:00Z.
+	realtime = 0
+	# ;;; The store-wide monotonic clock, which is defined as a clock measuringreal time, 
+	# whose value cannot be adjusted and which cannot have negative clock jumps 
+	monotonic = enum.auto() 
+	process_cputime_id = enum.auto() #;;; The CPU-time clock associated with the current process.
+	thread_cputime_id = enum.auto() #;;; The CPU-time clock associated with the current thread.
+
+class wasi_clock:
+	wasi_clockid_to_clock = {
+		wasi_clockid.realtime: time.CLOCK_REALTIME,
+		wasi_clockid.monotonic: time.CLOCK_MONOTONIC,
+		wasi_clockid.process_cputime_id: time.CLOCK_PROCESS_CPUTIME_ID,
+		wasi_clockid.thread_cputime_id: time.CLOCK_THREAD_CPUTIME_ID
+	}
+
+	@classmethod
+	def get_clock(cls, id):
+		clock = cls.wasi_clockid_to_clock.get(wasi_clockid(id))
+		if clock is None:
+			raise wasi_error("Invalid clockid '{id}'.", wasi_err.inval)
+		return clock
+
+	@classmethod
+	def clock_getres(cls, id):
+		clock = cls.get_clock(id)
+		res = time.clock_getres(clock)
+		res_int = 1
+		while res < 1:
+			res *= 10
+			res_int *= 10
+		return res_int
+
+	@classmethod
+	def clock_gettime(cls, id):
+		clock = cls.get_clock(id)
+		return time.clock_gettime(clock)
+
+	@classmethod
+	def clock_gettime_ns(cls, id):
+		clock = cls.get_clock(id)
+		return time.clock_gettime_ns(clock)
+		
+	def __init__(self):
+		self.mapping = {}
+		
+	def clock(self, id):
+		id = wasi_clockid(id)
+		return self.mapping.get(id, id)
+		
+	def get_res(self, id):
+		id = self.clock(id)
+		return wasi_clock.clock_getres(id)
+		
+	def get_time(self, id):
+		id = self.clock(id)
+		return wasi_clock.clock_gettime(id)
+		
+	def get_time_ns(self, id):
+		id = self.clock(id)
+		return wasi_clock.clock_gettime_ns(id)
+
 
 # https://github.com/WebAssembly/WASI/blob/v0.2.11/docs/Preview2.md
 class wasi_io(wasm_component):
@@ -3083,11 +3211,13 @@ class wasi_snapshot_preview1(wasm_component):
 			sz += len(k) + len(v) + 2 # 2 bytes for = and zero terminator
 		self.memory_view.setUint32(size, sz)
 
-	def clock_res_get(self, id):
-		return wasi_err.notcapable
+	def clock_res_get(self, id, timestamp):
+		res = self.env.clock.get_res(id)
+		self.memory_view.setBigUint64(timestamp, res)
 
-	def clock_time_get(self, id, precision):
-		return wasi_err.notcapable
+	def clock_time_get(self, id, precision, timestamp):
+		t = self.env.clock.get_time_ns(id)
+		self.memory_view.setBigUint64(timestamp, t)
 
 	def fd_advise(self, fd, offset, len, advice):
 		return wasi_err.notcapable
@@ -3281,13 +3411,13 @@ class wasm_memory_view:
 		return self.view.getBigInt64(offset, self.getter_endianess(littleEndian))
 
 	def setBigInt64(self, offset, value, littleEndian = None):
-		self.view.setBigInt64(offset, value, self.setter_endianess(littleEndian))
+		self.view.setBigInt64(offset, javascript_bigint(value), self.setter_endianess(littleEndian))
 
 	def getBigUint64(self, offset, littleEndian = None):
 		return self.view.getBigUint64(offset, self.getter_endianess(littleEndian))
 
 	def setBigUint64(self, offset, value, littleEndian = None):
-		return self.view.setBigUint64(offset, value, self.setter_endianess(littleEndian))
+		return self.view.setBigUint64(offset, javascript_biguint(value), self.setter_endianess(littleEndian))
 
 	def getFloat16(self, offset, littleEndian = None):
 		return self.view.getFloat16(offset, self.getter_endianess(littleEndian))
@@ -3389,6 +3519,7 @@ class wasm_env:
 		self.stderr = kwargs.get("stderr")
 		if self.stderr is None:
 			self.stderr = wasm_io()
+		self._clock = None
 		self._memory_factory = memory_factory
 		self._memory_view_factory = memory_view_factory
 		self._memory = None
@@ -3414,6 +3545,14 @@ class wasm_env:
 	@exit_code.setter
 	def exit_code(self, value):
 		self._exit_code = value
+	
+	@property
+	def clock(self):
+		if self._clock is None:
+		#if self.parent is not None:
+		#	return self.parent.clock()
+			self._clock = wasi_clock()
+		return self._clock
 	
 	@property
 	def components(self):
