@@ -1700,17 +1700,17 @@ class javascript_callback:
 		return self._jsvalue
 
 	def _invoke_callback(self, ctx, funcObj, thisObj, args_count, args, ex):
-		ctx = c_void_p(ctx)
-		funcObj = c_void_p(funcObj)
-		thisObj = c_void_p(thisObj)
-		callback_args = []
-		for i in range(args_count):
-			arg = c_void_p.from_address(args + (i * sizeof(c_void_p)))
-			arg_value = jscore.jsvalueref_to_py(ctx, arg)
-			if isinstance(arg_value, dict):
-				arg_value = javascript_object(arg_value)
-			callback_args.append(arg_value)
 		try:
+			ctx = c_void_p(ctx)
+			funcObj = c_void_p(funcObj)
+			thisObj = c_void_p(thisObj)
+			callback_args = []
+			for i in range(args_count):
+				arg = c_void_p.from_address(args + (i * sizeof(c_void_p)))
+				arg_value = jscore.jsvalueref_to_py(ctx, arg)
+				if isinstance(arg_value, dict):
+					arg_value = javascript_object(arg_value)
+				callback_args.append(arg_value)
 			returnValue = self.callback(*callback_args)
 			returnJSValue_ref = jscore.py_to_jsvalueref(ctx, returnValue)
 			return returnJSValue_ref.value
@@ -3042,10 +3042,10 @@ class wasi_random(wasm_component):
 
 class wasi_filesystem(wasm_component):
 	pass
-	
+
 class wasi_sockets(wasm_component):
 	pass
-	
+
 class wasi_cli(wasm_component):
 	pass
 
@@ -3163,7 +3163,6 @@ class wasi_snapshot_preview1(wasm_component):
 			stream.write(text)
 			written += size
 		self.memory_view.setUint32(ciov_size, written)
-		self.env.notify()
 
 	def path_create_directory(self, fd, path):
 		return wasi_err.notcapable
@@ -3399,6 +3398,7 @@ class wasm_env:
 		self._streams = {}
 		self._process = None
 
+
 	@property
 	def vars(self):
 		return self._vars
@@ -3420,6 +3420,17 @@ class wasm_env:
 		if self._components is None:
 			self._components = {}
 		return self._components
+		
+	@property
+	def process(self):
+		return self._process
+		
+	@process.setter
+	def process(self, value):
+		self._process = value
+		
+	def notify(self):
+		self.process.notify()
 	
 	def _ensure_memory(self):
 		if self._memory_factory is None or self._memory is not None:
@@ -3464,17 +3475,7 @@ class wasm_env:
 		elif fd == 2:
 			return self.stderr
 		return self._streams.get(fd)
-		
-	@property
-	def process(self):
-		return self._process
-		
-	@process.setter
-	def process(self, value):
-		self._process = value
-		
-	def notify(self):
-		self.process.notify()
+	
 
 class wasm_context(jscore_context):
 	def __init__(self, runtime, context = None):
