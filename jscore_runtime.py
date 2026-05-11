@@ -1048,7 +1048,11 @@ class jscore:
 			return cls.JSValueToBoolean(context_ref, value_ref)
 		if cls.JSValueIsNumber(context_ref, value_ref):
 			ex = c_void_p(None)
-			return cls.JSValueToNumber(context_ref, value_ref, byref(ex))
+			v = cls.JSValueToNumber(context_ref, value_ref, byref(ex))
+			int_v = int(v)
+			if v == int_v:
+				return int_v
+			return v
 		if cls.JSValueIsBigInt(context_ref, value_ref):
 			ex = c_void_p(None)
 			return cls.JSValueToInt64(context_ref, value_ref, byref(ex))
@@ -2822,6 +2826,10 @@ class wasm_process_thread(threading.Thread):
 # for python code which would interact with a system process which isnt otherwise supported by ios
 class wasm_process:
 	def __init__(self, env, module, args, kwargs, callback = None):
+		if not isinstance(env, wasm_env):
+			raise ValueError("Invalid process, env must be a wasm_env")
+		if not isinstance(module, wasm_module):
+			raise ValueError("Invalid process, module must be a wasm_module")
 		self.env = env
 		self.module = module
 		self.args = args
@@ -2834,6 +2842,11 @@ class wasm_process:
 		self.callback = callback
 		self.lock = threading.RLock()
 		self.awaiter = threading.Condition(self.lock)
+		self.env.init_process(self)
+	
+	@property
+	def module_path(self):
+		return self.module.path
 	
 	@property
 	def exit_code(self):
@@ -2940,22 +2953,25 @@ class wasm_io(io.StringIO):
 		self.awaiter = threading.Condition(threading.Lock())
 		self.read_count = 0
 		self.write_count = 0
+		self.read_cookie = self.tell()
+		self.write_cookie = self.tell()
 		
 	def read(self, *args, **kwargs):
-		count = self.write_count
 		with self.awaiter:
-			while count == self.write_count:
+			while self.read_count == self.write_count:
 				self.awaiter.wait()
+			self.seek(self.read_cookie)
 			data = super().read(*args, **kwargs)
-			self.read_count += 1
+			self.read_cookie = self.tell()
+			self.read_count += len(data)
 			return data
 		
 	def write(self, *args, **kwargs):
 		with self.awaiter:
-			cookie = self.tell()
+			self.seek(self.write_cookie)
 			written = super().write(*args, **kwargs)
-			self.seek(cookie)
-			self.write_count += 1
+			self.write_cookie = self.tell()
+			self.write_count += written
 			self.awaiter.notify()
 			return written
 
@@ -2989,7 +3005,8 @@ class wasm_component:
 				if isinstance(e, wasi_error):
 					err = e.err
 					e = e.ex
-				log.exception(f"Exception in wasm_component {component_type}.{func_name}: {err.name}, {err} {e}")
+				if e is not None:
+					log.exception(f"Exception in wasm_component {component_type}.{func_name}: {err.name}, {err} {e}")
 				return err # we need to return a failure code to wasm if an error or exception is not otherwise handled
 		return error_handler
 	
@@ -3157,6 +3174,92 @@ class wasi_clock:
 		id = self.clock(id)
 		return wasi_clock.clock_gettime_ns(id)
 
+class wasi_filetype(enum.IntEnum):
+	#;;; The type of the file descriptor or file is unknown or is different from any of the other types specified.
+	unknown = 0,
+	block_device = enum.auto() # ;;; The file descriptor or file refers to a block device inode.
+	character_device = enum.auto() #;;; The file descriptor or file refers to a character device inode.
+	directory = enum.auto() #;;; The file descriptor or file refers to a directory inode.
+	regular_file = enum.auto() #;;; The file descriptor or file refers to a regular file inode.
+	socket_dgram = enum.auto() #;;; The file descriptor or file refers to a datagram socket.
+	socket_stream = enum.auto() #;;; The file descriptor or file refers to a byte-stream socket.
+	symbolic_link = enum.auto() #;;; The file refers to a symbolic link inode.
+
+class wasi_fdrights(enum.IntFlag):
+	none = 0
+	#;;; The right to invoke `fd_datasync`. If `path_open` is set, includes the right to invoke `path_open` with `fdflags::dsync`.
+	fd_datasync = enum.auto()
+	#;;; The right to invoke `fd_read` and `sock_recv`. If `rights::fd_seek` is set, includes the right to invoke `fd_pread`.
+	fd_read = enum.auto()
+	#;;; The right to invoke `fd_seek`. This flag implies `rights::fd_tell`.
+	fd_seek = enum.auto()
+	#;;; The right to invoke `fd_fdstat_set_flags`.
+	fd_fdstat_set_flags = enum.auto()
+	#;;; The right to invoke `fd_sync`. If `path_open` is set, includes the right to invoke `path_open` with `fdflags::rsync` and `fdflags::dsync`.
+	fd_sync = enum.auto()
+	# The right to invoke `fd_seek` in such a way that the file offset remains unaltered, or to invoke `fd_tell`.
+	fd_tell = enum.auto()
+	#;;; The right to invoke `fd_write` and `sock_send`. If `rights::fd_seek` is set, includes the right to invoke `fd_pwrite`.
+	fd_write = enum.auto()
+	#;;; The right to invoke `fd_advise`.
+	fd_advise = enum.auto()
+	#;;; The right to invoke `fd_allocate`.
+	fd_allocate = enum.auto()
+	#;;; The right to invoke `path_create_directory`.
+	path_create_directory = enum.auto()
+	#;;; If `path_open` is set, the right to invoke `path_open` with `oflags::creat`.
+	path_create_file = enum.auto()
+	#;;; The right to invoke `path_link` with the file descriptor as the source directory.
+	path_link_source = enum.auto()
+	#;;; The right to invoke `path_link` with the file descriptor as the target directory.
+	path_link_target = enum.auto()
+	#;;; The right to invoke `path_open`.
+	path_open = enum.auto()
+	#;;; The right to invoke `fd_readdir`.
+	fd_readdir = enum.auto()
+	#;;; The right to invoke `path_readlink`.
+	path_readlink = enum.auto()
+	#;;; The right to invoke `path_rename` with the file descriptor as the source directory.
+	path_rename_source = enum.auto()
+	#;;; The right to invoke `path_rename` with the file descriptor as the target directory.
+	path_rename_target = enum.auto()
+	#;;; The right to invoke `path_filestat_get`.
+	path_filestat_get = enum.auto()
+	#;;; The right to change a file's size. If `path_open` is set, includes the right to invoke `path_open` with `oflags::trunc`.
+	path_filestat_set_size = enum.auto()
+	#;;; The right to invoke `path_filestat_set_times`.
+	path_filestat_set_times = enum.auto()
+	#;;; The right to invoke `fd_filestat_get`.
+	fd_filestat_get = enum.auto()
+	#;;; The right to invoke `fd_filestat_set_size`.
+	fd_filestat_set_size = enum.auto()
+	#;;; The right to invoke `fd_filestat_set_times`.
+	fd_filestat_set_times = enum.auto()
+	#;;; The right to invoke `path_symlink`.
+	path_symlink = enum.auto()
+	#;;; The right to invoke `path_remove_directory`.
+	path_remove_directory = enum.auto()
+	#;;; The right to invoke `path_unlink_file`.
+	path_unlink_file = enum.auto()
+	#;;; If `rights::fd_read` is set, includes the right to invoke `poll_oneoff` to subscribe to `eventtype::fd_read`.
+	#;;; If `rights::fd_write` is set, includes the right to invoke `poll_oneoff` to subscribe to `eventtype::fd_write`.
+	poll_fd_readwrite = enum.auto()
+	#;;; The right to invoke `sock_shutdown`.
+	sock_shutdown = enum.auto()
+	#;;; The right to invoke `sock_accept`.
+	sock_accept = enum.auto()
+	
+class wasi_filestat:
+	def __init__(self):
+		self.device = 0
+		self.ino = 0
+		self.filetype = wasi_filetype.unknown
+		self.nlink = 0
+		self.size = 0
+		self.atim = 0
+		self.mtim = 0
+		self.ctim = 0
+		
 
 # https://github.com/WebAssembly/WASI/blob/v0.2.11/docs/Preview2.md
 class wasi_io(wasm_component):
@@ -3231,8 +3334,16 @@ class wasi_snapshot_preview1(wasm_component):
 	def fd_datasync(self, fd):
 		return wasi_err.notcapable
 
-	def fd_fdstat_get(self, fd):
-		return wasi_err.notcapable
+	def fd_fdstat_get(self, fd, buffer):
+		fd = self.env.get_fd(fd)
+		stats = fd.stat()
+		buffer = self.memory_view.setBigUint64(buffer, stats.device)
+		buffer = self.memory_view.setBigUint64(buffer, stats.ino)
+		buffer = self.memory_view.setUint8(buffer, stats.filetype) # possibly padded ?
+		buffer = self.memory_view.setBigUint64(buffer, stats.nlink)
+		buffer = self.memory_view.setBigUint64(buffer, stats.atim)
+		buffer = self.memory_view.setBigUint64(buffer, stats.mtim)
+		buffer = self.memory_view.setBigUint64(buffer, stats.ctim)
 
 	def fd_fdstat_set_flags(self, fd, flags):
 		return wasi_err.notcapable
@@ -3240,7 +3351,7 @@ class wasi_snapshot_preview1(wasm_component):
 	def fd_fdstat_set_rights(self, fd, fs_rights_base, fs_rights_inheriting):
 		return wasi_err.notcapable
 
-	def fd_filestat_get(self, fd):
+	def fd_filestat_get(self, fd, buffer):
 		return wasi_err.notcapable
 
 	def fd_filestat_set_size(self, fd, size):
@@ -3252,11 +3363,14 @@ class wasi_snapshot_preview1(wasm_component):
 	def fd_pread(self, fd, iovs, offset):
 		return wasi_err.notcapable
 
-	def fd_prestat_get(self, fd):
-		return wasi_err.notcapable
+	def fd_prestat_get(self, fd, buffer):
+		path = self.env.get_fd(fd).path
+		buffer = self.memory_view.setUint32(buffer, 0) # dir
+		buffer = self.memory_view.setUint32(buffer, len(str(path))) # length?
 
-	def fd_prestat_dir_name(self, fd, path, pathlen):
-		return wasi_err.notcapable
+	def fd_prestat_dir_name(self, fd, buffer, count):
+		path = self.env.get_fd(fd).path
+		self.memory_view.setString(buffer, path, count)
 
 	def fd_pwrite(self, fd, iovs, offset):
 		return wasi_err.notcapable
@@ -3279,20 +3393,19 @@ class wasi_snapshot_preview1(wasm_component):
 	def fd_tell(self, fd):
 		return wasi_err.notcapable
 
-	def fd_write(self, fd, ciovs_buf, ciovs_count, ciov_size):
+	def fd_write(self, fd, iovs_buf, iovs_count, iov_size):
 		stream = self.env.get_stream(fd)
 		if stream is None:
 			return wasi_err.badf
 		written = 0
-		iov = fd != 2 and ciovs_count == 1
-		for i in range(int(ciovs_count)):
-			ciov = ciovs_buf + (i * 8)
-			ptr = self.memory_view.getUint32(ciov)
-			size = self.memory_view.getUint32(ciov+4)
+		for i in range(int(iovs_count)):
+			iov = iovs_buf + (i * 8)
+			ptr = self.memory_view.getUint32(iov)
+			size = self.memory_view.getUint32(iov+4)
 			text = self.memory_view.getString(ptr, size)
 			stream.write(text)
 			written += size
-		self.memory_view.setUint32(ciov_size, written)
+		self.memory_view.setUint32(iov_size, written)
 
 	def path_create_directory(self, fd, path):
 		return wasi_err.notcapable
@@ -3306,7 +3419,7 @@ class wasi_snapshot_preview1(wasm_component):
 	def path_link(self, old_fd, old_flags, old_path, new_fd, new_path):
 		return wasi_err.notcapable
 
-	def path_open(self, fd, dirflags, path, oflags, fs_rights_base, fs_rights_inheriting, fdflags):
+	def path_open(self, fd, dirflags, path, oflags, fs_rights_base, fs_rights_inheriting, fdflags, *args):
 		return wasi_err.notcapable
 
 	def path_readlink(self, fd, path, buf, buf_len):
@@ -3412,66 +3525,77 @@ class wasm_memory_view:
 
 	def setBigInt64(self, offset, value, littleEndian = None):
 		self.view.setBigInt64(offset, javascript_bigint(value), self.setter_endianess(littleEndian))
+		return offset + 8
 
 	def getBigUint64(self, offset, littleEndian = None):
 		return self.view.getBigUint64(offset, self.getter_endianess(littleEndian))
 
 	def setBigUint64(self, offset, value, littleEndian = None):
-		return self.view.setBigUint64(offset, javascript_biguint(value), self.setter_endianess(littleEndian))
+		self.view.setBigUint64(offset, javascript_biguint(value), self.setter_endianess(littleEndian))
+		return offset + 8
 
 	def getFloat16(self, offset, littleEndian = None):
 		return self.view.getFloat16(offset, self.getter_endianess(littleEndian))
 
 	def setFloat16(self, offset, value, littleEndian = None):
-		return self.view.setFloat16(offset, value, self.setter_endianess(littleEndian))
+		self.view.setFloat16(offset, value, self.setter_endianess(littleEndian))
+		return offset + 2
 
 	def getFloat32(self, offset, littleEndian = None):
 		return self.view.getFloat32(offset, self.getter_endianess(littleEndian))
 
 	def setFloat32(self, offset, value, littleEndian = None):
-		return self.view.setFloat32(offset, value, self.setter_endianess(littleEndian))
+		self.view.setFloat32(offset, value, self.setter_endianess(littleEndian))
+		return offset + 4
 
 	def getFloat64(self, offset, littleEndian = None):
 		return self.view.getFloat64(offset, self.getter_endianess(littleEndian))
 
 	def setFloat64(self, offset, value, littleEndian = None):
-		return self.view.setFloat64(offset, value, self.setter_endianess(littleEndian))
+		self.view.setFloat64(offset, value, self.setter_endianess(littleEndian))
+		return offset + 8
 
 	def getInt8(self, offset):
 		return self.view.getInt8(offset)
 
 	def setInt8(self, offset, value):
-		return self.view.setInt8(offset, value)
+		self.view.setInt8(offset, value)
+		return offset + 1
 
 	def getInt16(self, offset, littleEndian = None):
 		return self.view.getInt16(offset, self.getter_endianess(littleEndian))
 
 	def setInt16(self, offset, value, littleEndian = None):
-		return self.view.setInt16(offset, value, self.setter_endianess(littleEndian))
+		self.view.setInt16(offset, value, self.setter_endianess(littleEndian))
+		return offset + 2
 		
 	def getInt32(self, offset, littleEndian = None):
 		return self.view.getInt32(offset, self.getter_endianess(littleEndian))
 
 	def setInt32(self, offset, value, littleEndian = None):
-		return self.view.setInt32(offset, value, self.setter_endianess(littleEndian))
+		self.view.setInt32(offset, value, self.setter_endianess(littleEndian))
+		return offset + 4
 		
 	def getUint8(self, offset):
 		return self.view.getUint8(offset)
 
 	def setUint8(self, offset, value):
-		return self.view.setUint8(offset, value)
+		self.view.setUint8(offset, value)
+		return offset + 1
 		
 	def getUint16(self, offset, littleEndian = None):
 		return self.view.getUint16(offset, self.getter_endianess(littleEndian))
 
 	def setUint16(self, offset, value, littleEndian = None):
-		return self.view.setUint16(offset, value, self.setter_endianess(littleEndian))
+		self.view.setUint16(offset, value, self.setter_endianess(littleEndian))
+		return offset + 2
 
 	def getUint32(self, offset, littleEndian = None):
 		return self.view.getUint32(offset, self.getter_endianess(littleEndian))
 
 	def setUint32(self, offset, value, littleEndian = None):
-		return self.view.setUint32(offset, value, self.setter_endianess(littleEndian))
+		self.view.setUint32(offset, value, self.setter_endianess(littleEndian))
+		return offset + 4
 	
 	max_string = 2048
 	def getString(self, offset, length, littleEndian = None):
@@ -3493,12 +3617,108 @@ class wasm_memory_view:
 			log.warning(f"wasm_memory_view.getString failed. {e}\ptr: {offset}, size: {length}, read: {len(buffer)}, buffer: {bytes(buffer)}")
 			raise wasi_error(e, wasi_err.ilseq)
 
-	def setString(self, offset, value, littleEndian = None):
-		data = value.encode('utf8') + b'\0'
+	def setString(self, offset, data, length = None, littleEndian = None):
+		if isinstance(data, str):
+			data = data.encode('utf8')
+		if length is not None:
+			data = data[:length]
 		data_len = len(data)
+		if data[data_len-1] != '\0':
+			data += b'\0' # null terminate
+			data_len +=1
 		for i in range(data_len):
 			self.setUint8(offset + i, data[i])
+		if length is not None:
+			return offset + length
 		return offset + data_len
+
+class wasm_mount:
+	def __init__(self, real_path, mount_path):
+		self.real_path = real_path
+		self.mount_path = mount_path
+		
+	def __repr__(self):
+		path = str(self.mount_path)
+		if not path.startswith('/'):
+			return f"/{path}"
+		return path
+
+class wasm_fd:
+	def __init__(self, id, context, *args, **kwargs):
+		self.id = id
+		self.context = context
+	
+	@property
+	def path(self):
+		id = self.id
+		if id < 3:
+			if id == 0:
+				return "/dev/stdin"
+			elif id == 1:
+				return "/dev/stdout"
+			elif id == 2:
+				return "/dev/stderr"
+		if isinstance(self.context, wasm_mount):
+			return str(self.context)
+		return "/dev/null"
+		
+	@property
+	def real_path(self):
+		if isinstance(self.context, wasm_mount):
+			return self.context.real_path
+		return None
+	
+	def stat(self):
+		stats = os.stat(self.real_path)
+		filestat = wasi_filestat()
+		return filestat
+
+class wasm_fds:
+	def __init__(self, stdin, stdout, stderr):
+		self._fds = { 0: wasm_fd(0, stdin), 1: wasm_fd(1, stdout), 2: wasm_fd(2, stderr) }
+		self._streams = { 0: stdin, 1: stdout, 2: stderr }
+		self._contexts = {}
+		for k,v in self._streams.items():
+			self._contexts[v] = k
+		
+	MAX_FD = 32767 # SHORT_MAX - 0,1,2 are reserved for stdin stdout and stderr
+	def new_fd(self, context, *args, **kwargs):
+		count = len(self._fds)
+		if count >= wasm_fds.MAX_FD:
+			raise wasi_error(wasi_err.nfile)
+		id = count
+		while id in self._fds:
+			id += 1
+			if fd == MAX_FD:
+				id = 3
+		fd = wasm_fd(id, context, *args, **kwargs)
+		self._fds[id] = fd
+		self._contexts[context] = id
+		return fd
+	
+	def get_id(self, fd):
+		if isinstance(fd, int):
+			return fd
+		if isinstance(fd, wasm_fd):
+			return fd.id
+		id = self._contexts.get(fd)
+		if id is None:
+			raise wasi_error(wasi_err.badf)
+		return id
+	
+	def get_fd(self, id):
+		id = self.get_id(id)
+		fd = self._fds.get(id)
+		if fd is None:
+			raise wasi_error(wasi_err.badf)
+		return fd
+	
+	def get_stream(self, id):
+		id = self.get_id(id)
+		stream = self._streams.get(id)
+		if stream is None:
+			raise wasi_error(wasi_err.badf)
+		return stream
 
 class wasm_env:
 	def __init__(self, parent = None, args = [], kwargs = {}, memory_factory = None, memory_view_factory = None):
@@ -3520,15 +3740,17 @@ class wasm_env:
 		if self.stderr is None:
 			self.stderr = wasm_io()
 		self._clock = None
+		if parent is None:
+			self._clock = wasi_clock()
+		else:
+			self._clock = parent.clock
 		self._memory_factory = memory_factory
 		self._memory_view_factory = memory_view_factory
 		self._memory = None
 		self._memory_view = None
 		self._components = None
-		self._fds = {}
-		self._streams = {}
+		self._fds = wasm_fds(self.stdin, self.stdout, self.stderr)
 		self._process = None
-
 
 	@property
 	def vars(self):
@@ -3548,10 +3770,6 @@ class wasm_env:
 	
 	@property
 	def clock(self):
-		if self._clock is None:
-		#if self.parent is not None:
-		#	return self.parent.clock()
-			self._clock = wasi_clock()
 		return self._clock
 	
 	@property
@@ -3599,21 +3817,34 @@ class wasm_env:
 		self._ensure_memory_view()
 		return self._memory_view
 	
+	def init_process(self, process):
+		self.process = process
+		for dir in self.dirs:
+			if isinstance(dir, tuple):
+				self.preopen(dir[0])
+			else:
+				self.preopen(dir)
+	
 	def preopen(self, dir):
-		pass
+		path = Path(dir)
+		if not path.exists():
+			raise FileNotFoundError(f"Preopen failed, directory does not exist at '{path}'.")
+		if not path.is_dir():
+			raise ValueError(f"Preopen failed, path is not a directory at '{path}'.")
+		module_dir = self.process.module_path.parent
+		self.new_fd(wasm_mount(path, path.relative_to(module_dir)))
+		files = path.glob("**/*")
+		#for file in files:
+		#	self.new_fd(file.relative_to(path))
+
+	def new_fd(self, context):
+		return self._fds.new_fd(context)
 	
 	def get_fd(self, fd):
-		return int(fd)
-	
+		return self._fds.get_fd(fd)
+
 	def get_stream(self, fd):
-		fd = self.get_fd(fd)
-		if fd == 0:
-			return self.stdin
-		elif fd == 1:
-			return self.stdout
-		elif fd == 2:
-			return self.stderr
-		return self._streams.get(fd)
+		return self._fds.get_stream(fd)
 	
 
 class wasm_context(jscore_context):
@@ -3699,7 +3930,7 @@ class wasm_context(jscore_context):
 		return None
 		
 	def load_module(self, module, env = None):
-		print(f"load: {module}")
+		log.debug(f"load: {module}")
 		if isinstance(module, str):
 			if module.startswith("/") or module.startswith("./") or module.endswith(".wasm"):
 				module = Path(module)
@@ -3718,14 +3949,13 @@ class wasm_context(jscore_context):
 			raise ImportError("Module must be wasm_module")
 		result = module.load(self, env)
 		self._modules[module.name] = module
-		return result
+		return module
 		
 	def _resolve_module_imports(self, module, imports, env):
 		if imports is None:
 			imports = {}
 		namespace = {}
-		print("imports:", module.imports)
-		print("exports:", module.exports)
+		log.debug(f"resolve module: {module}")
 		for module_import in module.imports:
 			module_name = module_import.module
 			import_name = module_import.name
@@ -3807,18 +4037,17 @@ class wasm_context(jscore_context):
 		def _cleanup(p):
 			del self._processes[p]
 		process = wasm_process(module_env, module, args, kwargs, _cleanup)
-		module_env.process = process
 		self._processes[process] = process
-		return process, module_path
+		return process
 	
 	def run(self, module, *args, **kwargs):
 		# wasm/wasi synchronous run, this runs the given module/program on the current thread until termination
-		process, module_path = self.new_process(module, *args, **kwargs)
+		process = self.new_process(module, *args, **kwargs)
 		return process.run()
 
 	def run_async(self, module, *args, **kwargs):
 		# wasm/wasi asynchronous run, this runs the given module/program on a new thread until termination
-		process, module_path = self.new_process(module, *args, **kwargs)
+		process = self.new_process(module, *args, **kwargs)
 		return process.run_async()
 		
 	def serve(self, path, *args, **kwargs):
@@ -4177,6 +4406,11 @@ if __name__ == '__main__':
 		test_adapter_path = str(test_adapter_path)
 	
 		from wasi_testsuite import wasi_test_runner_main
-		wasi_test_runner_main("-t", test_suite_path + "1", test_suite_path + "3", "-r", test_adapter_path)
+		wasi_test_runner_main("-t", 
+			test_suite_path + "1", 
+			#test_suite_path + "1-done", 
+			#test_suite_path + "3", 
+			"-r", test_adapter_path
+		)
 		
 
