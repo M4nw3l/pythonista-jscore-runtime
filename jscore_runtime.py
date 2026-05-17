@@ -2945,7 +2945,8 @@ class wasm_process:
 		self.wait(timeout = timeout, join = True)
 		
 	def send_signal(self, sig):
-		print(sig)
+		#print(sig)
+		pass
 
 class wasm_io(io.StringIO):
 	def __init__(self, *args, **kwargs):
@@ -3393,9 +3394,12 @@ class wasi_snapshot_preview1(wasm_component):
 		return wasi_err.notcapable
 
 	def fd_prestat_get(self, fd, buffer):
-		path = self.env.get_fd(fd).path
-		buffer = self.memory_view.setUint32(buffer, 0) # dir
-		buffer = self.memory_view.setUint32(buffer, len(str(path))) # length without null terminator?
+		try:
+			path = self.env.get_fd(fd).path
+			buffer = self.memory_view.setUint32(buffer, 0) # dir
+			buffer = self.memory_view.setUint32(buffer, len(str(path))) # length without null terminator?
+		except wasi_error as e:
+			return e.err # suppress traceback as this determines maximum preopened fd.
 
 	def fd_prestat_dir_name(self, fd, buffer, count):
 		path = self.env.get_fd(fd).path
@@ -3416,6 +3420,7 @@ class wasi_snapshot_preview1(wasm_component):
 		pos = None
 		if whence == 0:
 			pos = os.SEEK_SET
+			fd = self.env.get_fd(fd)
 		elif whence == 1:
 			pos = os.SEEK_CUR
 		elif whence == 2:
@@ -3427,14 +3432,11 @@ class wasi_snapshot_preview1(wasm_component):
 			o = stream.tell()
 			self.memory_view.setUint64(newoffset, o)
 		except Exception as e:
-			print(e)
 			return wasi_err.spipe
 		
 	def fd_sync(self, fd):
 		stream = self.env.get_stream(fd)
-		#if stream.flushable():
-		#	stream.flush()
-		#return wasi_err.notcapable
+		stream.flush()
 
 	def fd_tell(self, fd, offset):
 		stream = self.env.get_stream(fd)
@@ -3443,7 +3445,27 @@ class wasi_snapshot_preview1(wasm_component):
 		o = stream.tell()
 		self.memory_view.setUint64(offset, o)
 
-	def fd_pread(self, fd, iovs, iovs_count, offset, *args): #TODO freeze cursor
+	def fd_pread(self, fd, iovs, iovs_count, offset, nread):
+		stream = self.env.get_stream(fd)
+		pos = stream.tell()
+		stream.seek(offset, os.SEEK_SET)
+		read = 0
+		for i in range(iovs_count):
+			iov = iovs + (i * 8)
+			ptr = self.memory_view.getUint32(iov)
+			size = self.memory_view.getUint32(iov+4)
+			data = stream.read(size)
+			count = min(len(data),size)
+			if isinstance(data, str) or isinstance(stream, io.StringIO):
+				self.memory_view.setString(ptr, data, count)
+			else: # need more direct sets of full buffers
+				for ii in range(count):
+					self.memory_view.setUint8(ptr + ii, data[ii])
+			read += count
+		self.memory_view.setUint32(nread, read)
+		stream.seek(pos, os.SEEK_SET)
+
+	def fd_read(self, fd, iovs, iovs_count, offset):
 		stream = self.env.get_stream(fd)
 		read = 0
 		for i in range(iovs_count):
@@ -3460,24 +3482,7 @@ class wasi_snapshot_preview1(wasm_component):
 			read += count
 		self.memory_view.setUint32(offset, read)
 
-	def fd_read(self, fd, iovs, iovs_count, offset, *args): #TODO freeze cursor
-		stream = self.env.get_stream(fd)
-		read = 0
-		for i in range(iovs_count):
-			iov = iovs + (i * 8)
-			ptr = self.memory_view.getUint32(iov)
-			size = self.memory_view.getUint32(iov+4)
-			data = stream.read(size)
-			count = len(data)
-			if isinstance(data, str) or isinstance(stream, io.StringIO):
-				self.memory_view.setString(ptr, data)
-			else: # need more direct sets of full buffers
-				for ii in range(count):
-					self.memory_view.setUint8(ptr + ii, data[ii])
-			read += count
-		self.memory_view.setUint32(offset, read)
-
-	def fd_write(self, fd, iovs, iovs_count, offset): #TODO freeze cursor
+	def fd_write(self, fd, iovs, iovs_count, offset):
 		stream = self.env.get_stream(fd)
 		written = 0
 		for i in range(iovs_count):
@@ -3497,8 +3502,10 @@ class wasi_snapshot_preview1(wasm_component):
 			written += size
 		self.memory_view.setUint32(offset, written)
 
-	def fd_pwrite(self, fd, iovs, iovs_count, offset):
+	def fd_pwrite(self, fd, iovs, iovs_count, offset, nwritten):
 		stream = self.env.get_stream(fd)
+		pos = stream.tell()
+		stream.seek(offset, os.SEEK_SET)
 		written = 0
 		for i in range(iovs_count):
 			iov = iovs + (i * 8)
@@ -3515,7 +3522,9 @@ class wasi_snapshot_preview1(wasm_component):
 					data.append(b)
 				stream.write(bytes(data))
 			written += size
-		self.memory_view.setUint32(offset, written)
+		self.memory_view.setUint32(nwritten, written)
+		stream.flush()
+		stream.seek(pos, os.SEEK_SET)
 
 	def path_create_directory(self, fd, path_ptr, path_size):
 		fd = self.env.get_fd(fd)
@@ -3564,9 +3573,11 @@ class wasi_snapshot_preview1(wasm_component):
 		fd = self.env.get_fd(fd)
 		return wasi_err.notcapable
 
-	def path_unlink_file(self, fd, path):
+	def path_unlink_file(self, fd, path_ptr, path_len):
 		fd = self.env.get_fd(fd)
-		return wasi_err.notcapable
+		path = self.memory_view.getString(path_ptr, path_len)
+		real_path = fd.real_path.joinpath(Path(path))
+		real_path.unlink(missing_ok=True)
 		
 	def poll_oneoff(self, events_in, events_out, nsubscriptions):
 		return wasi_err.notcapable
@@ -3786,7 +3797,7 @@ class wasm_mount:
 		return path
 
 class wasm_fd:
-	def __init__(self, id, context, *args, **kwargs):
+	def __init__(self, id, context, **kwargs):
 		self.id = id
 		self.context = context
 	
@@ -3825,6 +3836,35 @@ class wasm_fd:
 		fdstat = wasi_fdstat()
 		return fdstat
 
+class wasm_stream:
+	def __init__(self, stream, append = False):
+		self.stream = stream
+		self.append = append
+	
+	@property
+	def seekable(self):
+		return self.stream.seekable
+	
+	def tell(self, *args, **kwargs):
+		return self.stream.tell(*args, **kwargs)
+	
+	def seek(self, *args, **kwargs):
+		self.stream.seek(*args, **kwargs)
+		
+	def read(self, *args, **kwargs):
+		return self.stream.read(*args, **kwargs)
+		
+	def write(self, *args, **kwargs):
+		if self.append:
+			self.stream.seek(0, os.SEEK_END)
+		return self.stream.write(*args, **kwargs)
+	
+	def flush(self, *args, **kwargs):
+		self.stream.flush()
+	
+	def close(self, *args, **kwargs):
+		self.stream.close(*args, **kwargs)
+
 class wasm_fds:
 	def __init__(self, stdin, stdout, stderr):
 		self._fds = { 0: wasm_fd(0, stdin), 1: wasm_fd(1, stdout), 2: wasm_fd(2, stderr) }
@@ -3834,7 +3874,7 @@ class wasm_fds:
 			self._contexts[v] = k
 		
 	MAX_FD = 32767 # SHORT_MAX - 0,1,2 are reserved for stdin stdout and stderr
-	def new_fd(self, context, stream, *args, **kwargs):
+	def new_fd(self, context, stream, **kwargs):
 		count = len(self._fds)
 		if count >= wasm_fds.MAX_FD:
 			raise wasi_error(wasi_err.nfile)
@@ -3843,7 +3883,7 @@ class wasm_fds:
 			id += 1
 			if fd == MAX_FD:
 				id = 3
-		fd = wasm_fd(id, context, *args, **kwargs)
+		fd = wasm_fd(id, context, **kwargs)
 		self._fds[id] = fd
 		self._contexts[context] = id
 		if stream is not None:
@@ -3873,6 +3913,15 @@ class wasm_fds:
 		if stream is None:
 			raise wasi_error(wasi_err.badf)
 		return stream
+		
+	def close_stream(self, id):
+		id = self.get_id(id)
+		if id < 3:
+			raise wasi_error(wasi_err.acces)
+		stream = self._streams.get(id)
+		if stream is not None:
+			stream.close()
+			del self._streams[id]
 		
 	def close_fd(self, id):
 		id = self.get_id(id)
@@ -4022,7 +4071,7 @@ class wasm_env:
 
 	def get_stream(self, fd):
 		return self._fds.get_stream(fd)
-
+		
 	def open_fd(self, fd, path, oflags, fs_rights_base, fs_rights_inheriting, fdflags):
 		fd = self.get_fd(fd)
 		path = Path(path)
@@ -4033,6 +4082,7 @@ class wasm_env:
 			raise wasi_error(wasi_err.notdir)
 		create = oflags & wasi_oflags.creat != 0 # create new file if not exists
 		truncate = oflags & wasi_oflags.trunc != 0 # truncate file to 0 (creates empty new file or replaces existing)
+		append = fdflags & wasi_fdflags.append != 0
 		if not create and not real_path.exists():
 			raise wasi_error(wasi_err.noent)
 		mount_path = fd.mount_path.joinpath(path)
@@ -4041,13 +4091,16 @@ class wasm_env:
 		if not real_path.is_dir():
 			mode = "r"
 			if create or truncate:
-				mode = "w" if truncate else "a"
+				mode = "a" if append else "w"
 			mode += "b"
-			stream = open(real_path, mode)
+			stream = wasm_stream(open(real_path, mode), append)
 		return self._new_fd(mount, stream)
 	
 	def close_fd(self, fd):
 		self._fds.close_fd(fd)
+		
+	def close_stream(self, fd):
+		self._fds.close_stream(fd)
 		
 	def cleanup(self):
 		self._fds.cleanup()
