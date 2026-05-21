@@ -3964,9 +3964,9 @@ class wasm_fds:
 			raise wasi_error(wasi_err.badf)
 		return stream
 		
-	def renumber_fd(self, from, to):
-		fid = self.get_id(from)
-		tid = self.get_id(to)
+	def renumber_fd(self, from_id, to_id):
+		fid = self.get_id(from_id)
+		tid = self.get_id(to_id)
 		if self._fds.get(tid) is not None:
 			raise wasi_error(wasi_err.addrinuse)
 		fd = self._fds.get(fid)
@@ -4161,8 +4161,8 @@ class wasm_env:
 			stream = wasm_stream(open(real_path, mode), append)
 		return self._new_fd(mount, stream)
 	
-	def renumber_fd(self, from, to):
-		self._fds.renumber_fd(from, to)
+	def renumber_fd(self, from_fd, to_fd):
+		self._fds.renumber_fd(from_fd, to_fd)
 	
 	def close_fd(self, fd):
 		self._fds.close_fd(fd)
