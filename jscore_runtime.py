@@ -3349,20 +3349,20 @@ class wasi_snapshot_preview1(wasm_component):
 		t = self.env.clock.get_time_ns(id)
 		self.memory_view.setUint64(timestamp, t)
 
-	def fd_advise(self, fd, offset, len, advice):
+	def fd_advise(self, fd, offset, count, advice):
 		fd = self.env.get_fd(fd)
-		return wasi_err.notcapable
+		fd.advise(offset, count, advice)
 
-	def fd_allocate(self, fd, offset, len):
-		fd = self.env.get_fd(fd) # ?
-		return wasi_err.notcapable
+	def fd_allocate(self, fd, offset, count):
+		fd = self.env.get_fd(fd)
+		fd.allocate(offset, count)
 
 	def fd_close(self, fd):
 		self.env.close_fd(fd)
 
 	def fd_datasync(self, fd):
-		fd = self.env.get_fd(fd)
-		return wasi_err.notcapable
+		stream = self.env.get_stream(fd)
+		stream.flush()
 
 	def fd_fdstat_get(self, fd, buffer):
 		fd = self.env.get_fd(fd)
@@ -3373,25 +3373,33 @@ class wasi_snapshot_preview1(wasm_component):
 		buffer = self.memory_view.setUint64(buffer, fdstat.fs_rights_base)
 		buffer = self.memory_view.setUint64(buffer, fdstat.fs_rights_inheriting)
 
-	def fd_fdstat_set_flags(self, fd, flags):
+	def fd_fdstat_set_flags(self, fd, fs_flags):
 		fd = self.env.get_fd(fd)
-		return wasi_err.notcapable
+		fd.fdstat_set(fs_flags=fs_flags)
 
 	def fd_fdstat_set_rights(self, fd, fs_rights_base, fs_rights_inheriting):
 		fd = self.env.get_fd(fd)
-		return wasi_err.notcapable
+		fd.fdstat_set(fs_rights_base=fs_rights_base, fs_rights_inheriting=fs_rights_inheriting)
 
 	def fd_filestat_get(self, fd, buffer):
 		fd = self.env.get_fd(fd)
-		return wasi_err.notcapable
+		filestat = fd.filestat()
+		buffer = self.memory_view.setUint32(buffer, filestat.device) # sizes need checking
+		buffer = self.memory_view.setUint32(buffer, filestat.ino)
+		buffer = self.memory_view.setUint32(buffer, filestat.filetype)
+		buffer = self.memory_view.setUint32(buffer, filestat.nlink)
+		buffer = self.memory_view.setUint64(buffer, filestat.size)
+		buffer = self.memory_view.setUint64(buffer, filestat.atim)
+		buffer = self.memory_view.setUint64(buffer, filestat.mtim)
+		buffer = self.memory_view.setUint64(buffer, filestat.ctim)
 
 	def fd_filestat_set_size(self, fd, size):
 		fd = self.env.get_fd(fd)
-		return wasi_err.notcapable
+		fd.filestat_set(size=size)
 
-	def fd_filestat_set_times(self, fd, atim, mtim, fst_flags):
+	def fd_filestat_set_times(self, fd, atim, mtim, ctim, *args):
 		fd = self.env.get_fd(fd)
-		return wasi_err.notcapable
+		fd.filestat_set(atim=atim, mtim=mtim, ctim=ctim)
 
 	def fd_prestat_get(self, fd, buffer):
 		try:
@@ -3405,13 +3413,18 @@ class wasi_snapshot_preview1(wasm_component):
 		path = self.env.get_fd(fd).path
 		self.memory_view.setString(buffer, path, count)
 
-	def fd_readdir(self, fd, buf, buf_len, cookie):
+	def fd_readdir(self, fd, buffer, buffer_size, cookie, nwritten):
 		fd = self.env.get_fd(fd)
-		return wasi_err.notcapable
+		path = fd.read_dir(cookie)
+		if path is not None:
+			count = min(buffer_size, len(path))
+			self.memory_view.setString(buffer, path, count)
+			self.memory_view.setUint64(nwritten, count)
+		else:
+			return wasi_err.noent
 
 	def fd_renumber(self, fd, to):
-		fd = self.env.get_fd(fd)
-		return wasi_err.notcapable
+		self.env.renumber_fd(fd, to)
 
 	def fd_seek(self, fd, offset, whence, newoffset):
 		stream = self.env.get_stream(fd)
@@ -3800,6 +3813,9 @@ class wasm_fd:
 	def __init__(self, id, context, **kwargs):
 		self.id = id
 		self.context = context
+		self.advice = []
+		self.fdstats = wasi_fdstat()
+		self._read_dir_paths = None
 	
 	@property
 	def path(self):
@@ -3826,15 +3842,49 @@ class wasm_fd:
 		if isinstance(self.context, wasm_mount):
 			return self.context.real_path
 		return None
-	
-	def stat(self):
+		
+	def fdstat(self):
+		return self.fdstats
+		
+	def fdstat_set(self, **kwargs):
+		for k,v in kwargs.items():
+			if hasattr(self.fdstats, k):
+				setattr(self.fdstats, k, v)
+				
+	def filestat(self):
 		stats = os.stat(self.real_path)
 		filestat = wasi_filestat()
 		return filestat
 		
-	def fdstat(self):
-		fdstat = wasi_fdstat()
-		return fdstat
+	def filestat_set(self, size=None, atim=None, mtim=None, ctim=None):
+		pass
+		
+	def advise(self, offset, count, advice):
+		self.advice.append({
+			"offset":offset,
+			"count":count,
+			"advice": advice
+		})
+		
+	def allocate(self, offset, count):
+		pass
+	
+	@property
+	def is_dir(self):
+		return self.real_path.is_dir()
+	
+	def read_dir(self, cookie):
+		if not self.is_dir:
+			raise wasi_error(wasi_err.notdir)
+		if self._read_dir_paths is None or cookie == 0:
+			self._read_dir_paths = list(self.real_path.glob("*"))
+		path = None
+		count = len(self._read_dir_paths)
+		if cookie < count:
+			path = self._read_dir_paths[cookie]
+		if cookie == count-1 or path is None:
+			self._read_dir_paths = None
+		return path
 
 class wasm_stream:
 	def __init__(self, stream, append = False):
@@ -3913,6 +3963,21 @@ class wasm_fds:
 		if stream is None:
 			raise wasi_error(wasi_err.badf)
 		return stream
+		
+	def renumber_fd(self, from, to):
+		fid = self.get_id(from)
+		tid = self.get_id(to)
+		if self._fds.get(tid) is not None:
+			raise wasi_error(wasi_err.addrinuse)
+		fd = self._fds.get(fid)
+		if fd is None:
+			raise wasi_error(wasi_err.badf)
+		stream = self._streams.get(fid)
+		del self._fds[fid]
+		self._fds[tid] = fd
+		if stream is not None:
+			del self.streams[fid]
+			self.streams[tid] = stream
 		
 	def close_stream(self, id):
 		id = self.get_id(id)
@@ -4095,6 +4160,9 @@ class wasm_env:
 			mode += "b"
 			stream = wasm_stream(open(real_path, mode), append)
 		return self._new_fd(mount, stream)
+	
+	def renumber_fd(self, from, to):
+		self._fds.renumber_fd(from, to)
 	
 	def close_fd(self, fd):
 		self._fds.close_fd(fd)
