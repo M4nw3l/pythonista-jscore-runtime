@@ -14,7 +14,7 @@ from objc_util import (c, object_getClass, class_getName, objc_getProtocol)
 import weakref
 from datetime import (datetime, timezone)
 from pathlib import Path
-import enum, io, json, os, re, secrets, shutil, struct, sys, tempfile, time, types
+import base64, enum, io, json, os, re, secrets, shutil, struct, sys, tempfile, time, types
 import threading
 import logging
 log = logging.getLogger(__name__)
@@ -947,7 +947,10 @@ class jscore:
 	def jsvalue_to_py(cls, value, parent_ref = None):
 		if javascript_value.is_null_or_undefined(value):
 			return value
-			
+		
+		if isinstance(value, javascript_value_base):
+			value = ~value
+		
 		if not objc.ns_subclass_of(value, cls.JSValue):
 			raise Exception("Value must be JSValue")
 		
@@ -997,6 +1000,16 @@ class jscore:
 		if jscore.JSObjectIsFunction(context_ref, value_ref):
 			return []
 		return cls.jsobjectref_keys(context_ref, value_ref)
+		
+	@classmethod
+	def jsobjectref_get_property(cls, context_ref, value_ref, key):
+		key_str = cls.str_to_jsstringref(key)
+		prop_ref = None
+		if cls.JSObjectHasProperty(context_ref, value_ref, key_str, ):
+			ex = c_void_p(None)
+			prop_ref = cls.JSObjectGetProperty(context_ref, value_ref, key_str, byref(ex))
+		cls.jsstringref_release(key_str)
+		return prop_ref
 	
 	@classmethod
 	def jsobjectref_to_py(cls, context_ref, value_ref, parent_ref = None):
@@ -3278,7 +3291,7 @@ class wasi_fdstat:
 		self.fs_rights_inheriting = wasi_fdrights.none
 
 class wasi_filestat:
-	def __init__(self):
+	def __init__(self, stats = None):
 		self.device = 0
 		self.ino = 0
 		self.filetype = wasi_filetype.unknown
@@ -3397,9 +3410,9 @@ class wasi_snapshot_preview1(wasm_component):
 		fd = self.env.get_fd(fd)
 		fd.filestat_set(size=size)
 
-	def fd_filestat_set_times(self, fd, atim, mtim, ctim, *args):
+	def fd_filestat_set_times(self, fd, atim, mtim, fst_flags):
 		fd = self.env.get_fd(fd)
-		fd.filestat_set(atim=atim, mtim=mtim, ctim=ctim)
+		fd.filestat_set(atim=atim, mtim=mtim, fst_flags=fst_flags)
 
 	def fd_prestat_get(self, fd, buffer):
 		try:
@@ -3472,8 +3485,7 @@ class wasi_snapshot_preview1(wasm_component):
 			if isinstance(data, str) or isinstance(stream, io.StringIO):
 				self.memory_view.setString(ptr, data, count)
 			else: # need more direct sets of full buffers
-				for ii in range(count):
-					self.memory_view.setUint8(ptr + ii, data[ii])
+				self.memory_view.setBytes(ptr, data, count)
 			read += count
 		self.memory_view.setUint32(nread, read)
 		stream.seek(pos, os.SEEK_SET)
@@ -3488,10 +3500,9 @@ class wasi_snapshot_preview1(wasm_component):
 			data = stream.read(size)
 			count = len(data)
 			if isinstance(data, str) or isinstance(stream, io.StringIO):
-				self.memory_view.setString(ptr, data)
+				self.memory_view.setString(ptr, data, count)
 			else: # need more direct sets of full buffers
-				for ii in range(count):
-					self.memory_view.setUint8(ptr + ii, data[ii])
+				self.memory_view.setBytes(ptr, data, count)
 			read += count
 		self.memory_view.setUint32(offset, read)
 
@@ -3507,11 +3518,8 @@ class wasi_snapshot_preview1(wasm_component):
 				text = self.memory_view.getString(ptr, size) 
 				stream.write(text)
 			else: # need more direct reads of full buffers
-				data = []
-				for ii in range(size):
-					b = self.memory_view.getUint8(ptr+ii)
-					data.append(b)
-				stream.write(bytes(data))
+				data = self.memory_view.getBytes(ptr, size)
+				stream.write(data)
 			written += size
 		self.memory_view.setUint32(offset, written)
 
@@ -3529,11 +3537,8 @@ class wasi_snapshot_preview1(wasm_component):
 				text = self.memory_view.getString(ptr, size) 
 				stream.write(text)
 			else: # need more direct reads of full buffers
-				data = []
-				for ii in range(size):
-					b = self.memory_view.getUint8(ptr+ii)
-					data.append(b)
-				stream.write(bytes(data))
+				data = self.memory_view.getBytes(ptr, size)
+				stream.write(data)
 			written += size
 		self.memory_view.setUint32(nwritten, written)
 		stream.flush()
@@ -3545,17 +3550,42 @@ class wasi_snapshot_preview1(wasm_component):
 		real_path = fd.real_path.joinpath(Path(path))
 		real_path.mkdir(parents=True, exists_ok=True)
 
-	def path_filestat_get(self, fd, flags, path_ptr, path_size, *args):
+	def path_filestat_get(self, fd, flags, path_ptr, path_size, buffer):
 		fd = self.env.get_fd(fd)
-		return wasi_err.notcapable
+		path = self.memory_view.getString(path_ptr, path_size)
+		filestat = fd.path_filestat(flags, path)
+		buffer = self.memory_view.setUint32(buffer, filestat.device) # sizes need checking
+		buffer = self.memory_view.setUint32(buffer, filestat.ino)
+		buffer = self.memory_view.setUint32(buffer, filestat.filetype)
+		buffer = self.memory_view.setUint32(buffer, filestat.nlink)
+		buffer = self.memory_view.setUint64(buffer, filestat.size)
+		buffer = self.memory_view.setUint64(buffer, filestat.atim)
+		buffer = self.memory_view.setUint64(buffer, filestat.mtim)
+		buffer = self.memory_view.setUint64(buffer, filestat.ctim)
 
 	def path_filestat_set_times(self, fd, flags, path_ptr, path_size, atim, mtim, fst_flags):
 		fd = self.env.get_fd(fd)
-		return wasi_err.notcapable
+		path = self.memory_view.getString(path_ptr, path_size)
+		fd.path_filestat_set(flags, path, atim=atim, mtim=mtim, fst_flags=fst_flags)
 
-	def path_link(self, old_fd, old_flags, old_path, new_fd, new_path):
-		fd = self.env.get_fd(fd)
-		return wasi_err.notcapable
+	def path_link(self, old_fd, old_flags, old_path_ptr, old_path_size, new_fd, new_path_ptr, new_path_size):
+		old_fd = self.env.get_fd(old_fd)
+		new_fd = self.env.get_fd(new_fd)
+		old_path = self.memory_view.getString(old_path_ptr, old_path_size)
+		new_path = self.memory_view.getString(new_path_ptr, new_path_size)
+		old_real_path = old_fd.real_path.joinpaths(Path(old_path))
+		new_real_path = new_fd.real_path.joinpaths(Path(new_path))
+		if not old_path.is_dir() or not new_path.is_dir():
+			return wasi_err.notdir
+		if not old_real_path.exists():
+			return wasi_err.noent
+		if new_real_path.exists():
+			return wasi_err.exist
+		#new_real_path.mkdir(parents=True)
+		return wasi_err.nosys 
+		# to implement this we need to simulate hard links most likely retaining a persistent reference
+		# of some sort understandable by mounts in wasms notion of the filesystem 
+		# (unless real hard linking is allowed by iOS? probably unlikely...)
 
 	def path_open(self, fd, dirflags, path_ptr, path_size, oflags, fs_rights_base, fs_rights_inheriting, fdflags, open_fd):
 		path = self.memory_view.getString(path_ptr, path_size)
@@ -3563,9 +3593,25 @@ class wasi_snapshot_preview1(wasm_component):
 		id = new_fd.id
 		self.memory_view.setUint32(open_fd, id)
 
-	def path_readlink(self, fd, path, buf, buf_len):
+	def path_readlink(self, fd, path_ptr, path_size, buffer, buffer_size, nwritten):
 		fd = self.env.get_fd(fd)
-		return wasi_err.notcapable
+		path = self.memory_view.getString(path_ptr, path_size)
+		real_path = fd.real_path.joinpaths(Path(path))
+		symlink_path = ""
+		try:
+			with open(real_path, "r") as symlink_file:
+				symlink_path = symlink_file.read()
+		except Exception as e:
+			return wasi_err.noent
+		if len(symlink_path) == 0:
+			return wasi_err.noent
+		symlink_path = Path(symlink_path)
+		if symlink_path.is_absolute():
+			symlink_path = symlink_path.relative_to(fd.real_path)
+		symlink_path = str(symlink_path)
+		count = min(len(symlink_path), buffer_size)
+		self.memory_view.setString(buffer, symlink_path, count)
+		self.memory_view.setUint32(nwritten, count)
 
 	def path_remove_directory(self, fd, path_ptr, path_size):
 		fd = self.env.get_fd(fd)
@@ -3576,15 +3622,40 @@ class wasi_snapshot_preview1(wasm_component):
 		try:
 			real_path.rmdir()
 		except Exception:
-			return wasi_err.notempty
+			return wasi_err.notempty # we could also use shutil but this is the standard behaviour... 
 
-	def path_rename(self, fd, old_path, new_fd, new_path):
-		fd = self.env.get_fd(fd)
-		return wasi_err.notcapable
+	def path_rename(self, old_fd, old_path_ptr, old_path_size, new_fd, new_path_ptr, new_path_size):
+		old_fd = self.env.get_fd(old_fd)
+		new_fd = self.env.get_fd(new_fd)
+		old_path = self.memory_view.getString(old_path_ptr, old_path_size)
+		new_path = self.memory_view.getString(new_path_ptr, new_path_size)
+		old_real_path = old_fd.real_path.joinpaths(Path(old_path))
+		if not old_real_path.exists():
+			return wasi_err.noent #?
+		new_real_path = new_fd.real_path.joinpaths(Path(new_path))
+		if new_real_path.exists():
+			return wasi_err.exist #?
+		shutil.move(old_real_path, new_real_path)
 
-	def path_symlink(self, old_path, fd, new_path):
+	def path_symlink(self, old_path_ptr, old_path_size, fd, new_path_ptr, new_path_size):
 		fd = self.env.get_fd(fd)
-		return wasi_err.notcapable
+		old_path = self.memory_view.getString(old_path_ptr, old_path_size)
+		new_path = self.memory_view.getString(new_path_ptr, new_path_size)
+		old_real_path = fd.real_path.joinpaths(Path(old_path))
+		new_real_path = fd.real_path.joinpaths(Path(new_path))
+		if not old_real_path.exists():
+			return wasi_err.noent # target file to symlink should exist
+		if new_path.exists():
+			return wasi_err.exist # symlink file should not exist
+		#try:
+		#	with open(new_real_path, "w") as symlink_file:
+		#		symlink_file.write(old_path) # a symlink is just a file with a path to another file
+		#except Exception as e:
+		#	return wasi_err.badf
+		# simlarly to path_link we need to track a persistent reference in wasms notion of the filesystem to simulate a soft link
+		# as otherwise we cannot determine this file to be a symlink for fdstat/filestat purposes. 
+		# unless real soft linking is allowed by iOS?
+		return wasi_err.nosys
 
 	def path_unlink_file(self, fd, path_ptr, path_len):
 		fd = self.env.get_fd(fd)
@@ -3592,8 +3663,22 @@ class wasi_snapshot_preview1(wasm_component):
 		real_path = fd.real_path.joinpath(Path(path))
 		real_path.unlink(missing_ok=True)
 		
-	def poll_oneoff(self, events_in, events_out, nsubscriptions):
-		return wasi_err.notcapable
+	def poll_oneoff(self, subscriptions_in, events_out, nsubscriptions, nevents):
+		events = []
+		for i in range(nsubscriptions):
+			sub_ptr = subscriptions_in + (i * 16)
+			user_data = self.memory_view.getUint64(sub_ptr)
+			sub_type = self.memory_view.getUint8(sub_ptr+8)
+			if sub_type == 0: # clock
+				pass
+			elif sub_type == 1: # fd_read
+				pass
+			elif sub_type == 2: # fd_write
+				pass
+		for event in events:
+			pass
+		self.memory_view.setUint32(nevents, len(events))
+			
 
 	def proc_exit(self, rval):
 		self.env.process_exit(rval)
@@ -3602,7 +3687,8 @@ class wasi_snapshot_preview1(wasm_component):
 		self.env.process_raise(sig)
 
 	def sched_yield(self):
-		return wasi_err.notcapable
+		#proc_thread = threading.current_thread() == self.env.process.thread
+		time.sleep(0) # this yields the wasm_process thread itself as well, not sure if this is desirable...?
 
 	def random_get(self, buf, buf_len):
 		if buf_len < 0:
@@ -3636,10 +3722,12 @@ class wasm_memory(javascript_value_base):
 	pass
 
 class wasm_memory_view:
-	def __init__(self, memory, view, getter_littleEndian = None, setter_littleEndian = None):
+	def __init__(self, memory, memory_view, allocator, getter_littleEndian = None, setter_littleEndian = None):
 		self.memory = memory
-		self._view = view
-		self._view_obj = view.jsobject
+		self._obj = memory_view.jsobject
+		self._view = memory_view.value
+		self._buffer = self._obj.buffer
+		self._allocator = allocator
 		self.system_littleEndian = sys.byteorder == "little"
 		if getter_littleEndian is None:
 			getter_littleEndian = self.system_littleEndian
@@ -3647,22 +3735,25 @@ class wasm_memory_view:
 			setter_littleEndian = self.system_littleEndian
 		self.getter_littleEndian = getter_littleEndian
 		self.setter_littleEndian = setter_littleEndian
-	
+		
+	def cleanup(self):
+		pass
+
 	@property
 	def view(self):
-		return self._view.value
-	
+		return self._view
+
 	@property
 	def buffer(self):
-		return self._view_obj.buffer.value
+		return self._buffer
 		
 	@property
 	def byteLength(self):
-		return self._view_obj.byteLength.value
+		return self.view.byteLength
 		
 	@property
 	def byteOffset(self):
-		return self._view_obj.byteOffset.value
+		return self.view.byteOffset
 		
 	def getter_endianess(self, littleEndian = None):
 		if littleEndian is not None:
@@ -3763,16 +3854,20 @@ class wasm_memory_view:
 	def setInt64(self, *args, **kwargs):
 		return self.setBigInt64(*args, **kwargs)
 	
-	max_string = 2048
-	def getString(self, offset, length, littleEndian = None):
+	max_string = 2048 # a quick length detection for short strings
+	def getString(self, offset, length):
+		if length < wasm_memory_view.max_string or offset+length < self.byteLength:
+			return self.getBytes(offset, length).decode('utf8')
+		# resort to a slow null termination detection if we can't determine a reasonable length < byteLength
 		buffer = []
-		max_string = wasm_memory_view.max_string
 		try:
-			for i in range(min(length, max_string)):
-				b = self.getUint8(offset + i)
-				if b == 0 and length > max_string:
-					break # zero termination?
+			length = min(length, self.byteLength)
+			while offset < length:
+				b = self.getUint8(offset) # can probably get away with scanning a few bytes here without crashing...
+				if b == 0: #and length > max_string:
+					break # null termination?
 				buffer.append(b)
+				offset+=1
 		except Exception as e:
 			log.warning(f"wasm_memory_view.getString failed. {e}\ptr: {offset}, size: {length}, read: {len(buffer)}, buffer: {bytes(buffer)}")
 			raise wasi_error(e, wasi_err.fault)
@@ -3783,20 +3878,25 @@ class wasm_memory_view:
 			log.warning(f"wasm_memory_view.getString failed. {e}\ptr: {offset}, size: {length}, read: {len(buffer)}, buffer: {bytes(buffer)}")
 			raise wasi_error(e, wasi_err.ilseq)
 
-	def setString(self, offset, data, length = None, littleEndian = None):
+	def setString(self, offset, data, length = None):
 		if isinstance(data, str):
 			data = data.encode('utf8')
-		if length is not None:
-			data = data[:length]
-		data_len = len(data)
-		if data[data_len-1] != '\0':
-			data += b'\0' # null terminate
-			data_len +=1
-		for i in range(data_len):
-			self.setUint8(offset + i, data[i])
-		if length is not None:
-			return offset + length
-		return offset + data_len
+		if length is None:
+			length = len(data)
+		if data[length-1] != b'\0':
+			data += b'\0'
+			length += 1
+		return self.setBytes(offset, data, length)
+		
+	def getBytes(self, offset, length):
+		return self._allocator.memory_get_bytes(self.memory, offset, length)
+		
+	def setBytes(self, offset, data, length = None):
+		if length is None:
+			length = len(data)
+		data = bytes(data[:length])
+		self._allocator.memory_set_bytes(self.memory, offset, data)
+		return offset + length
 
 class wasm_mount:
 	def __init__(self, real_path, mount_path):
@@ -3853,10 +3953,10 @@ class wasm_fd:
 				
 	def filestat(self):
 		stats = os.stat(self.real_path)
-		filestat = wasi_filestat()
+		filestat = wasi_filestat(stats)
 		return filestat
 		
-	def filestat_set(self, size=None, atim=None, mtim=None, ctim=None):
+	def filestat_set(self, size=None, atim=None, mtim=None, ctim=None, fst_flags=0):
 		pass
 		
 	def advise(self, offset, count, advice):
@@ -3885,6 +3985,16 @@ class wasm_fd:
 		if cookie == count-1 or path is None:
 			self._read_dir_paths = None
 		return path
+
+	def path_filestat(self, flags, path):
+		path = Path(path)
+		real_path = self.real_path.joinpath(path)
+		stats = os.stat(real_path)
+		filestat = wasi_filestat(stats)
+		return filestat
+		
+	def path_filestat_set(self, flags, path, size=None, atim=None, mtim=None, ctim=None, fst_flags=0):
+		pass
 
 class wasm_stream:
 	def __init__(self, stream, append = False):
@@ -4008,7 +4118,7 @@ class wasm_fds:
 				self.close_fd(fd)
 
 class wasm_env:
-	def __init__(self, parent = None, args = [], kwargs = {}, memory_factory = None, memory_view_factory = None):
+	def __init__(self, parent = None, args = [], kwargs = {}, allocator = None):
 		self.parent = parent # parent wasm env
 		self.args = args
 		self.kwargs = kwargs
@@ -4031,8 +4141,7 @@ class wasm_env:
 			self._clock = wasi_clock()
 		else:
 			self._clock = parent.clock
-		self._memory_factory = memory_factory
-		self._memory_view_factory = memory_view_factory
+		self._allocator = allocator
 		self._memory = None
 		self._memory_view = None
 		self._components = None
@@ -4077,14 +4186,14 @@ class wasm_env:
 		self.process.notify()
 	
 	def _ensure_memory(self):
-		if self._memory_factory is None or self._memory is not None:
+		if self._allocator is None or self._memory is not None:
 			return
-		self._memory = wasm_memory(self._memory_factory())
+		self._memory = wasm_memory(self._allocator.memory_factory())
 		
 	def _ensure_memory_view(self):
-		if self._memory_view_factory is None or (self._memory_view is not None and self._memory_view.byteLength != 0):
+		if self._allocator is None or (self._memory_view is not None and self._memory_view.byteLength != 0):
 			return
-		self._memory_view = wasm_memory_view(self.memory, self._memory_view_factory(self.memory))
+		self._memory_view = wasm_memory_view(self.memory, self._allocator.memory_view_factory(self.memory), self._allocator)
 	
 	@property
 	def memory(self):
@@ -4172,6 +4281,8 @@ class wasm_env:
 		
 	def cleanup(self):
 		self._fds.cleanup()
+		if self._memory_view is not None:
+			self._memory_view.cleanup()
 
 class wasm_context(jscore_context):
 	def __init__(self, runtime, context = None):
@@ -4208,6 +4319,14 @@ class wasm_context(jscore_context):
 			"memory_view_create": function(wasm_memory) {
 				return new DataView(wasm_memory.buffer);
 			},
+			"memory_get_bytes": function(wasm_memory, offset, length) {
+				const data = new Uint8Array(wasm_memory.buffer, offset, length);
+				return data.toBase64();
+			},
+			"memory_set_bytes": function(wasm_memory, offset, data) {
+				const buffer = new Uint8Array(wasm_memory.buffer, offset);
+				buffer.set(data)
+			}
 			};})();""").value
 
 	def deallocate(self):
@@ -4356,9 +4475,15 @@ class wasm_context(jscore_context):
 	def new_process(self, module, *args, **kwargs):
 		module_path = str(wasm_module.get_module_file_path(module))
 		args = ( module_path, ) + args
-		memory_factory = lambda: self._loader.memory_create.call({ "initial": 1 })
-		memory_view_factory = lambda memory: self._loader.memory_view_create.call(memory)
-		module_env = wasm_env(self._env, args, kwargs, memory_factory, memory_view_factory)
+		# allocator is a wrapper for handling memory operations via js
+		allocator = javascript_object()
+		allocator.memory_factory = lambda: self._loader.memory_create.call({ "initial": 2 })
+		allocator.memory_view_factory = lambda memory: self._loader.memory_view_create.call(memory)
+		# These utilities provide a mechanism to pass bytes more efficiently between wasm memory and python bi-directionally as single calls.
+		# Instead of calling DataView getUint8/setUint8 for length times, or decoding from 16/32/64 bit integers.
+		allocator.memory_get_bytes = lambda memory, offset, length: base64.b64decode(self._loader.memory_get_bytes(memory, offset, length))
+		allocator.memory_set_bytes = lambda memory, offset, data: self._loader.memory_set_bytes.call(memory, offset, data)
+		module_env = wasm_env(self._env, args, kwargs, allocator = allocator)
 		module = self.load_module(module, env = module_env)
 		def _cleanup(p):
 			del self._processes[p]
