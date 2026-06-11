@@ -949,7 +949,7 @@ class jscore:
 			return value
 		
 		if isinstance(value, javascript_value_base):
-			value = ~value
+			return value
 		
 		if not objc.ns_subclass_of(value, cls.JSValue):
 			raise Exception("Value must be JSValue")
@@ -968,8 +968,11 @@ class jscore:
 		
 		if value.isSymbol():
 			return javascript_symbol(value)
-		
-		return cls.jsvalue_jsobject_to_py(value, parent_ref = parent_ref)
+			
+		obj = cls.jsvalue_jsobject_to_py(value, parent_ref = parent_ref)
+		if cls.jsvalue_is_typed_array(value):
+			obj = javascript_typed_array(obj, value)
+		return obj
 
 	@classmethod
 	def jsvalue_is_object(cls, value, context_ref = None, value_ref = None):
@@ -980,10 +983,16 @@ class jscore:
 		if jscore.JSObjectIsFunction(context_ref, value_ref):
 			return False
 		return True
+
+	@classmethod
+	def jsvalue_is_typed_array(cls, value, context_ref = None, value_ref = None):
+		return not cls.jsvalue_is_typed_array_type(value, cls.kJSTypedArrayTypeNone, context_ref, value_ref)
 		
 	@classmethod
-	def jsvalue_is_array_type(cls, value, typedArrayType, context_ref = None, value_ref = None):
-		if not objc.ns_subclass_of(value, jscore.JSValue):
+	def jsvalue_is_typed_array_type(cls, value, typedArrayType, context_ref = None, value_ref = None):
+		if value is None and value_ref is None:
+			return False
+		if value is not None and not objc.ns_subclass_of(value, jscore.JSValue):
 			return False
 		if value_ref is None:
 			context_ref, value_ref = cls.jsvalue_get_refs(value)
@@ -1086,7 +1095,10 @@ class jscore:
 			symbol = cls.jsstringref_to_py(str_ref)
 			return javascript_symbol(symbol)
 		if cls.JSValueIsObject(context_ref, value_ref):
-			return cls.jsobjectref_to_py(context_ref, value_ref, parent_ref)
+			obj = cls.jsobjectref_to_py(context_ref, value_ref, parent_ref)
+			if cls.jsvalue_is_typed_array(None, context_ref, value_ref):
+				obj = javascript_typed_array(obj, None, context_ref, value_ref)
+			return obj
 		raise NotImplementedError("Unknown value_ref type")
 
 	@classmethod
@@ -1097,6 +1109,8 @@ class jscore:
 			return cls.JSValueMakeUndefined(context_ref)
 		if isinstance(value, c_void_p):
 			return value # assume a void pointer is a value ref
+		if isinstance(value, javascript_value_base):
+			value = ~value
 		if objc.ns_subclass_of(value, cls.JSValue):
 			ctx_ref, value_ref = cls.jsvalue_get_refs(value)
 			#if context_ref != ctx_ref:
@@ -1119,12 +1133,6 @@ class jscore:
 		if isinstance(value, str):
 			str_ref = jscore.str_to_jsstringref(value)
 			return cls.JSValueMakeString(context_ref, str_ref)
-		if isinstance(value, javascript_value_base):
-			jsvalue = ~value
-			ctx_ref, value_ref = cls.jsvalue_get_refs(jsvalue)
-			#if context_ref != ctx_ref:
-				#raise Exception("Context mismatch")
-			return value_ref
 		if isinstance(value, javascript_promise):
 			value_ref = value.get_jsvalue_ref(context_ref)
 			return value_ref
@@ -1480,7 +1488,7 @@ class javascript_value_converter:
 		
 	def to_jsvalueref(self, context_ref):
 		raise NotImplementedError()
-	
+
 class javascript_bigint(javascript_value_converter):
 	def to_jsvalue(self, context):
 		value = self.value
@@ -1506,7 +1514,6 @@ class javascript_bigint(javascript_value_converter):
 		if jsvalue_ref is None and ex is not None:
 			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
 		return jsvalue_ref
-
 
 class javascript_biguint(javascript_bigint):
 	def to_jsvalue(self, context):
@@ -1575,6 +1582,143 @@ class javascript_symbol:
 	def __init__(self, symbol):
 		self.symbol = symbol
 		#print(f"javascript_symbol {symbol}")
+
+class javascript_object_value_base(javascript_value_base):
+	def __init__(self, obj, jsvalue = None, context_ref = None, value_ref = None):
+		self.___obj___ = obj
+		javascript_value_base.__init__(self, jsvalue, context_ref, value_ref)
+		self._init_()
+		
+	def _init_(self):
+		self.___init___ = True
+
+	def __repr__(self):
+		return str(self.___obj___)
+
+	def __getattr__(self, key):
+		value = self.___obj___.get(key, javascript_value.undefined)
+		if isinstance(value, dict):
+			value = javascript_object(value)
+		elif isinstance(value, list):
+			value = javascript_list(value)
+		return value
+		
+	def __setattr__(self, key, value):
+		if not self.__dict__.get("___init___", False):
+			super().__setattr__(key, value)
+		elif key in self.___obj___:
+			self.___obj___[key] = value
+			# synchronisation needed...
+
+class javascript_typed_array_iter:
+	def __init__(self, ptr, length, item_type = c_uint8):
+		self._ptr = cast(ptr,c_void_p)
+		self._index = 0
+		self._length = length
+		self._item_type = item_type
+		self._item_size = sizeof(self._item_type)
+	
+	def __iter__(self):
+		self._index = 0
+		return self
+	
+	def __next__(self):
+		if self._ptr is not None and self._index < self._length:
+			addr = self._ptr.value + self._index
+			value = self._item_type.from_address(addr)
+			self._index += self._item_size
+			return value
+		raise StopIteration()
+
+class javascript_typed_array(javascript_object_value_base):
+	
+	@classmethod
+	def get_ctype(cls, jstype):
+		if jstype == jscore.kJSTypedArrayTypeUint8Array or jstype == jscore.kJSTypedArrayTypeArrayBuffer:
+			return c_uint8
+		elif jstype == jscore.kJSTypedArrayTypeInt32Array:
+			return c_int32
+		elif jstype == jscore.kJSTypedArrayTypeUint32Array:
+			return c_uint32
+		elif jstype == jscore.kJSTypedArrayTypeFloat32Array:
+			return c_float
+		elif jstype == jscore.kJSTypedArrayTypeFloat64Array:
+			return c_double
+		elif jstype == jscore.kJSTypedArrayTypeBigInt64Array:
+			return c_int64
+		elif jstype == jscore.kJSTypedArrayTypeBigUint64Array:
+			return c_uint64
+		#less likely types
+		elif jstype == jscore.kJSTypedArrayTypeUint8ClampedArray:
+			return c_uint8
+		elif jstype == jscore.kJSTypedArrayTypeInt8Array:
+			return c_int8
+		elif jstype == jscore.kJSTypedArrayTypeInt16Array:
+			return c_int16
+		elif jstype == jscore.kJSTypedArrayTypeUint16Array:
+			return c_uint16
+		#if jstype == jscore.kJSTypedArrayTypeNone: 
+		return None # invalid / not a typed array 
+	
+	def __repr__(self):
+		items = str(list(self))
+		obj = super().__repr__()
+		return "\n".join([items, obj])
+	
+	def __iter__(self):
+		return self._new_iter()
+
+	def _new_iter(self, item_type = None):
+		context_ref, value_ref = jscore.jsvalue_get_refs(~self)
+		ex = c_void_p(None)
+		jstype = jscore.JSValueGetTypedArrayType(context_ref, value_ref, byref(ex))
+		if ex.value is not None:
+			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
+		if item_type is None:
+			item_type = javascript_typed_array.get_ctype(jstype)
+		if jstype == jscore.kJSTypedArrayTypeNone or item_type is None:
+			raise ValueError("Javascript Object is not a TypedArray.")
+		length = jscore.JSObjectGetTypedArrayByteLength(context_ref, value_ref, byref(ex))
+		if ex.value is not None:
+			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
+		ptr = jscore.JSObjectGetTypedArrayBytesPtr(context_ref, value_ref, byref(ex))
+		if ex.value is not None:
+			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
+		return javascript_typed_array_iter(ptr, length, item_type)
+
+	def to_bytes(self):
+		context_ref, value_ref = jscore.jsvalue_get_refs(~self)
+		ex = c_void_p(None)
+		length = jscore.JSObjectGetTypedArrayByteLength(context_ref, value_ref, byref(ex))
+		if length < 1:
+			return bytes()
+		buffer_array = (c_uint8 * length)()
+		self.copy_to(addressof(buffer_array), count=length)
+		return bytes(buffer_array)
+		
+	def copy_to(self, dst, offset = 0, count = None):
+		dst = cast(dst, c_void_p)
+		if dst.value is None:
+			raise ValueError("Target address pointer is null.")
+		if count == 0:
+			return 0
+		context_ref, value_ref = jscore.jsvalue_get_refs(~self)
+		ex = c_void_p(None)
+		if count is None:
+			count = jscore.JSObjectGetTypedArrayByteLength(context_ref, value_ref, byref(ex))
+			if ex.value is not None:
+				raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
+		if count == 0:
+			return 0
+		ptr = jscore.JSObjectGetTypedArrayBytesPtr(context_ref, value_ref, byref(ex))
+		if ex.value is not None:
+			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
+		ptr = cast(cast(ptr, c_void_p).value + offset, c_void_p)
+		memmove(dst, ptr, count)
+		return count
+	
+	#def __buffer__(self, flags): # ideally we'd implement the buffer protocol too if python was >= 3.12
+		#pass
 
 class javascript_function:
 	def __init__(self, jsvalue = None, context_ref = None, value_ref = None, parent_ref = None, source = None):
@@ -4320,12 +4464,12 @@ class wasm_context(jscore_context):
 				return new DataView(wasm_memory.buffer);
 			},
 			"memory_get_bytes": function(wasm_memory, offset, length) {
-				const data = new Uint8Array(wasm_memory.buffer, offset, length);
-				return data.toBase64();
+				const buffer = new Uint8Array(wasm_memory.buffer, offset, length);
+				return new Uint8Array(buffer);
 			},
 			"memory_set_bytes": function(wasm_memory, offset, data) {
 				const buffer = new Uint8Array(wasm_memory.buffer, offset);
-				buffer.set(data)
+				buffer.set(data);
 			}
 			};})();""").value
 
@@ -4454,7 +4598,7 @@ class wasm_context(jscore_context):
 		return namespace
 	
 	def _load_module_array(self, module_data, name = None, imports = None, env = None):
-		if not jscore.jsvalue_is_array_type(module_data, jscore.kJSTypedArrayTypeUint8Array):
+		if not jscore.jsvalue_is_typed_array_type(module_data, jscore.kJSTypedArrayTypeUint8Array):
 			raise ImportError("Module array must be JSValue of an Uint8Array instance type.")
 		if name is None:
 			name = "wasm_module_"+str(len(self._modules))
@@ -4481,8 +4625,8 @@ class wasm_context(jscore_context):
 		allocator.memory_view_factory = lambda memory: self._loader.memory_view_create.call(memory)
 		# These utilities provide a mechanism to pass bytes more efficiently between wasm memory and python bi-directionally as single calls.
 		# Instead of calling DataView getUint8/setUint8 for length times, or decoding from 16/32/64 bit integers.
-		allocator.memory_get_bytes = lambda memory, offset, length: base64.b64decode(self._loader.memory_get_bytes(memory, offset, length))
-		allocator.memory_set_bytes = lambda memory, offset, data: self._loader.memory_set_bytes.call(memory, offset, data)
+		allocator.memory_get_bytes = lambda memory, offset, length: self._loader.memory_get_bytes(memory, offset, length).to_bytes()
+		allocator.memory_set_bytes = lambda memory, offset, data: self._loader.memory_set_bytes(memory, offset, data)
 		module_env = wasm_env(self._env, args, kwargs, allocator = allocator)
 		module = self.load_module(module, env = module_env)
 		def _cleanup(p):
@@ -4521,10 +4665,19 @@ if __name__ == '__main__':
 	import console
 	console.clear()
 
-	run_tests = False
-	run_wasi_tests = True
+	run_tests = True
+	run_wasi_tests = False
 	log.setLevel(logging.DEBUG)
 	logging.basicConfig(level = logging.DEBUG)
+	
+	def header(text, end_only = False):
+		if not end_only:
+			print("")
+			print("-" * 35)
+		print(text)
+		print("-" * 35)
+		print("")
+
 	if run_tests:
 
 		runtime = jscore.runtime()
@@ -4609,15 +4762,7 @@ if __name__ == '__main__':
 				print(f"Expected: {expected}\nActual: {value}\nPassed: {match}")
 			print("-" * 35)
 			return value
-			
-		def header(text, end_only = False):
-			if not end_only:
-				print("")
-				print("-" * 35)
-			print(text)
-			print("-" * 35)
-			print("")
-	
+
 		header("javascript runtime")
 		print(runtime, context)
 		header("primitives", True)
@@ -4668,6 +4813,21 @@ if __name__ == '__main__':
 		eval('[ "abc" , "def", "ghi" ]', [ "abc" , "def", "ghi" ])
 		
 		eval('[ [1,"2"], ["a"], [{"1":2, "obj":{}, "arr":[]}]]', [ [1,"2"], ["a"], [ {"1":2, "obj":{}, "arr":[] }]])
+		
+		header("typed arrays")
+		eval("new Uint8Array([0,97,115,109,1,0,0,0]);")
+		eval("new Uint16Array([0,97,115,109,1,0,0,0]);")
+		eval("new Uint32Array([0,97,115,109,1,0,0,0]);")
+		
+		eval("new Int8Array([0,97,115,109,1,0,0,0]);")
+		eval("new Int16Array([0,97,115,109,1,0,0,0]);")
+		eval("new Int32Array([0,97,115,109,1,0,0,0]);")
+		
+		eval("new Float32Array([0,97,115,109,1,0,0,0]);")
+		eval("new Float64Array([0,97,115,109,1,0,0,0]);")
+		
+		eval("new BigUint64Array([]);")
+		eval("new BigInt64Array([]);")
 		
 		header("objects")
 		eval('const obj = { "str": "str", "int": 1, "float": 1.4, "obj":{ "hello": "world"} }; obj;', {"str":"str", "int":1, "float": 1.4, "obj": {"hello": "world"}})
@@ -4851,6 +5011,7 @@ if __name__ == '__main__':
 		jscore.destroy()
 
 	if run_wasi_tests:
+		header("wasi snapshot preview 1")
 		test_suite_path = Path("./wasi_testsuite/wasm32-wasip").absolute()
 		test_suite_path = str(test_suite_path)
 		test_adapter_path = Path("./wasi_testsuite/jscore_runtime_adapter.py").absolute()
@@ -4863,5 +5024,4 @@ if __name__ == '__main__':
 			#test_suite_path + "3", 
 			"-r", test_adapter_path
 		)
-		
 
