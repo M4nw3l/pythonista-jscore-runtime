@@ -14,7 +14,7 @@ from objc_util import (c, object_getClass, class_getName, objc_getProtocol)
 import weakref
 from datetime import (datetime, timezone)
 from pathlib import Path
-import base64, enum, functools, io, json, os, re, secrets, shutil, struct, sys, tempfile, time, types
+import base64, enum, functools, io, json, math, os, re, secrets, shutil, struct, sys, tempfile, time, types
 import threading
 import logging
 log = logging.getLogger(__name__)
@@ -1514,16 +1514,28 @@ class javascript_value(javascript_value_base):
 		return self.jsvalue
 		
 class javascript_type_base:
+	mixin_member_excludes = set(
+		['__class__', '__dict__', '__dir__', '__init__', '__init_subclass__', '__new__', '__subclasshook__'] +
+		['__getattr__', '__getattribute__', '__setattr__', '__delattr__', '__index__']
+	)
+	
 	@classmethod
 	def mixin(cls, typ):
 		members = set(dir(typ))
 		class javascript_type_mixin(cls):
 			def __init__(self, value):
 				javascript_type_base.__init__(self, value, typ)
+				self.___ctor___ = type(self)
 
 		members -= set(dir(javascript_type_mixin))
+		# hard exclude some special members which could cause undesirable/inconsistent behaviour
+		# though the above exclusion of the base mixin type covers most fundamentals these just add a slightly firmer guarentee
+		members -= javascript_type_base.mixin_member_excludes
 		def javascript_type_mixin_method(self, method, *args, **kwargs):
-			return method(self.py_value, *args, **kwargs)
+			result = method(self.py_value, *args, **kwargs)
+			if type(result) is typ:
+				return self.___ctor___(result)
+			return result
 	
 		for member in members:
 			attr = getattr(typ, member)
@@ -1535,12 +1547,6 @@ class javascript_type_base:
 	def __init__(self, value, typ = None):
 		self.___value___ = value
 		self.___type___ = typ
-		
-	def __int__(self):
-		return int(self.py_value)
-		
-	def __float__(self):
-		return float(self.py_value)
 
 	def __repr__(self):
 		return repr(self.py_value)
@@ -1569,20 +1575,6 @@ class javascript_type_base:
 			raise NotImplementedError()
 
 class javascript_bigint(javascript_type_base):
-	def __init__(self, value, context_ref = None, value_ref = None, unsigned = None):
-		if objc.ns_subclass_of(value, jscore.JSValue):
-			context_ref, value_ref = jscore.jsvalue_get_refs(value)
-		if value_ref is not None:
-			ex = c_void_p(None)
-			if unsigned:
-				value = jscore.JSValueToUint64(context_ref, value_ref, byref(ex))
-				value = c_uint64(value)
-			else:
-				value = jscore.JSValueToInt64(context_ref, value_ref, byref(ex))
-				value = c_int64(value)
-		value = javascript_bigint.new(value)
-		super().__init__(value, javascript_bigint)
-
 	c_int64_limit = objc.c_int_limit(c_int64)
 	c_uint64_limit = objc.c_int_limit(c_uint64)
 	
@@ -1599,12 +1591,61 @@ class javascript_bigint(javascript_type_base):
 				return javascript_biguint_i(value)
 			return javascript_bigint_i(value)
 		if isinstance(value, float):
+			value = math.trunc(value) # truncate here is important for consistent cast-like behaviour
 			if value < cls.c_int64_limit.min or value > cls.c_uint64_limit.max:
 				raise ValueError(f"BigInt value underflow/overflow {value}.")
 			return javascript_bigint_f(value)
 		if isinstance(value, str):
 			return javascript_bigint_s(value)
 		raise ValueError(f"Unhandled BigInt value: {value} ({type(value)})")
+
+	def __init__(self, value, context_ref = None, value_ref = None, unsigned = None):
+		if objc.ns_subclass_of(value, jscore.JSValue):
+			context_ref, value_ref = jscore.jsvalue_get_refs(value)
+		if value_ref is not None:
+			ex = c_void_p(None)
+			if unsigned:
+				value = jscore.JSValueToUint64(context_ref, value_ref, byref(ex))
+				value = c_uint64(value)
+			else:
+				value = jscore.JSValueToInt64(context_ref, value_ref, byref(ex))
+				value = c_int64(value)
+		value = javascript_bigint.new(value)
+		super().__init__(value, javascript_bigint)
+		
+	def __bool__(self):
+		return bool(int(self.py_value))
+
+	def __int__(self):
+		return int(self.py_value)
+
+	def __float__(self):
+		return float(self.py_value)
+
+# bigint operator forwarding, method name is also passed in for debugging purposes
+def _javascript_bigint_int_method_wrapper(self, name, method, other = None):
+	result = None
+	if other is None:
+		result = method(int(self))
+	else:
+		result = method(int(self), int(other))
+	t = type(result)
+	if t is int:
+		return javascript_bigint(result)
+	return result
+
+_javascript_bigint_int_methods = set(
+	['__abs__', '__add__', '__and__', '__ceil__', '__divmod__', '__eq__', '__floor__', '__floordiv__', 
+	'__ge__', '__gt__', '__hash__', '__invert__', '__le__', '__lshift__','__lt__', '__mod__', '__mul__', '__ne__', 
+	'__neg__', '__or__', '__pos__', '__pow__', '__radd__', '__rand__', '__rdivmod__', '__rfloordiv__', '__rlshift__', 
+	'__rmod__', '__rmul__', '__ror__', '__round__', '__rpow__', '__rrshift__', '__rshift__', '__rsub__', '__rtruediv__', 
+	'__rxor__', '__sizeof__', '__sub__', '__truediv__', '__trunc__', '__xor__']
+)
+for m in _javascript_bigint_int_methods:
+	member = getattr(int, m)
+	if callable(member):
+		method = functools.partialmethod(_javascript_bigint_int_method_wrapper, m, member)
+		setattr(javascript_bigint, m, method)
 
 class javascript_bigint_i(javascript_bigint.mixin(int)):
 	def to_jsvalue(self, context):
@@ -1633,15 +1674,16 @@ class javascript_biguint_i(javascript_bigint.mixin(int)):
 		return jsvalue_ref
 		
 class javascript_bigint_f(javascript_bigint.mixin(float)):
+	
 	def to_jsvalue(self, context):
 		value = self.py_value
-		value = round(value)
+		value = math.trunc(value) # truncate as this is a cast
 		return jscore.JSValue.valueWithNewBigIntFromDouble_inContext_(c_double(value), context)
 		
 	def to_jsvalueref(self, context_ref):
 		value = self.py_value
 		ex = c_void_p(None)
-		value = round(value)
+		value = math.trunc(value) # truncate as this is a cast
 		jsvalue_ref = jscore.JSBigIntCreateWithDouble(context_ref, c_double(value), byref(ex))
 		if jsvalue_ref is None and ex is not None:
 			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
