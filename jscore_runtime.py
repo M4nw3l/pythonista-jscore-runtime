@@ -14,7 +14,7 @@ from objc_util import (c, object_getClass, class_getName, objc_getProtocol)
 import weakref
 from datetime import (datetime, timezone)
 from pathlib import Path
-import base64, enum, io, json, os, re, secrets, shutil, struct, sys, tempfile, time, types
+import base64, enum, functools, io, json, os, re, secrets, shutil, struct, sys, tempfile, time, types
 import threading
 import logging
 log = logging.getLogger(__name__)
@@ -326,7 +326,25 @@ class objc:
 		path = str(path)
 		data = fileManager.contentsAtPath_(path)
 		return data
-
+	
+	class _ctype_limit:
+		def __init__(self, ctype, min, max):
+			self.ctype = ctype
+			self.min = min
+			self.max = max
+	
+	_ctype_limits = {}
+	@classmethod
+	def c_int_limit(cls, c_int_type):
+		limit = cls._ctype_limits.get(c_int_type)
+		if limit is None:
+			signed = c_int_type(-1).value < c_int_type(0).value
+			bit_size = sizeof(c_int_type) * 8
+			signed_limit = 2 ** (bit_size - 1)
+			limits = (-signed_limit, signed_limit - 1) if signed else (0, 2 * signed_limit - 1)
+			limit = cls._ctype_limit(c_int_type, *limits)
+			cls._ctype_limits[c_int_type] = limit
+		return limit
 
 #JavaScriptCore api
 class jscore:
@@ -919,17 +937,20 @@ class jscore:
 	def jsvalue_jsobject_to_py(cls, value, context_ref = None, value_ref = None, parent_ref = None):
 		if value_ref is None:
 			context_ref, value_ref = cls.jsvalue_get_refs(value)
-		if jscore.JSObjectIsFunction(context_ref, value_ref):
+		if cls.JSObjectIsFunction(context_ref, value_ref):
 			return javascript_function(value, context_ref, value_ref, parent_ref)
-		keys = cls.jsobjectref_keys(context_ref, value_ref)
-		if value.isArray():
-			count = len(keys)
-			items = []
-			for i in range(count):
-				v = value.valueAtIndex_(i)
-				v = cls.jsvalue_to_py(v, value_ref)
-				items.append(v)
-			return items
+		is_typed_array = cls.jsvalue_is_typed_array(value, context_ref = context_ref, value_ref = value_ref)
+		keys = []
+		if not is_typed_array:
+			keys = cls.jsobjectref_keys(context_ref, value_ref)
+			if value.isArray():
+				count = len(keys)
+				items = []
+				for i in range(count):
+					v = value.valueAtIndex_(i)
+					v = cls.jsvalue_to_py(v, value_ref)
+					items.append(v)
+				return items
 		prototype = cls.jsvalue_get_prototype(value, context_ref, value_ref)
 		obj = cls.jsvalue_to_py(prototype, value_ref if parent_ref is None else parent_ref)
 		if javascript_value.is_null_or_undefined(obj):
@@ -941,6 +962,8 @@ class jscore:
 			if not javascript_value.is_undefined(v):
 				 # avoid setting undefined values as this can unset inherited values
 				obj[key] = v
+		if is_typed_array:
+			obj = javascript_typed_array(obj, value, context_ref = context_ref, value_ref = value_ref)
 		return obj
 
 	@classmethod
@@ -962,17 +985,18 @@ class jscore:
 			
 		if value.isBoolean():
 			return value.toBool()
-		
+
 		if value.isNumber() or value.isString() or value.isDate():
 			return objc.ns_to_py(value.toObject())
 		
 		if value.isSymbol():
 			return javascript_symbol(value)
+		
+		context_ref, value_ref = cls.jsvalue_get_refs(value)
+		if cls.JSValueIsBigInt(context_ref, value_ref):
+			return javascript_bigint(None, context_ref, value_ref)
 			
-		obj = cls.jsvalue_jsobject_to_py(value, parent_ref = parent_ref)
-		if cls.jsvalue_is_typed_array(value):
-			obj = javascript_typed_array(obj, value)
-		return obj
+		return cls.jsvalue_jsobject_to_py(value, context_ref = context_ref, value_ref = value_ref, parent_ref = parent_ref)
 
 	@classmethod
 	def jsvalue_is_object(cls, value, context_ref = None, value_ref = None):
@@ -983,6 +1007,16 @@ class jscore:
 		if jscore.JSObjectIsFunction(context_ref, value_ref):
 			return False
 		return True
+		
+	@classmethod
+	def jsvalue_is_bigint(cls, value, context_ref = None, value_ref = None):
+		if value is None and value_ref is None:
+			return False
+		if value is not None and not objc.ns_subclass_of(value, jscore.JSValue):
+			return False
+		if value_ref is None:
+			context_ref, value_ref = cls.jsvalue_get_refs(value)
+		return cls.JSValueIsBigInt(context_ref, value_ref)
 
 	@classmethod
 	def jsvalue_is_typed_array(cls, value, context_ref = None, value_ref = None):
@@ -1030,7 +1064,6 @@ class jscore:
 			if str_ref:
 				source = cls.jsstringref_to_py(str_ref)
 			return javascript_function(None, context_ref, value_ref, parent_ref, source)
-
 		obj = None
 		if cls.JSValueIsArray(context_ref, value_ref):
 			names_ref = cls.JSObjectCopyPropertyNames(context_ref, value_ref)
@@ -1046,7 +1079,10 @@ class jscore:
 			obj = cls.jsvalueref_to_py(context_ref, prototype_ref, value_ref if parent_ref is None else parent_ref)
 			if javascript_value.is_null_or_undefined(obj):
 				obj = {}
-			keys = cls.jsobjectref_keys(context_ref, value_ref)
+			is_typed_array = cls.jsvalue_is_typed_array(None, context_ref, value_ref)
+			keys = []
+			if not is_typed_array:
+				keys = cls.jsobjectref_keys(context_ref, value_ref)
 			keys = set(keys+list(obj.keys()))
 			for key in keys:
 				key_ref = cls.str_to_jsstringref(key)
@@ -1056,6 +1092,8 @@ class jscore:
 				value = cls.jsvalueref_to_py(context_ref, jsvalue_ref, value_ref if parent_ref is None else parent_ref)
 				if not javascript_value.is_undefined(value):
 					obj[key] = value
+			if is_typed_array:
+				obj = javascript_typed_array(obj, None, context_ref, value_ref)
 		return obj
 	
 	@classmethod
@@ -1076,8 +1114,7 @@ class jscore:
 				return int_v
 			return v
 		if cls.JSValueIsBigInt(context_ref, value_ref):
-			ex = c_void_p(None)
-			return cls.JSValueToInt64(context_ref, value_ref, byref(ex))
+			return javascript_bigint(None, context_ref, value_ref)
 		if cls.JSValueIsString(context_ref, value_ref):
 			ex = c_void_p(None)
 			str_ref = cls.JSValueToStringCopy(context_ref, value_ref, byref(ex))
@@ -1095,10 +1132,7 @@ class jscore:
 			symbol = cls.jsstringref_to_py(str_ref)
 			return javascript_symbol(symbol)
 		if cls.JSValueIsObject(context_ref, value_ref):
-			obj = cls.jsobjectref_to_py(context_ref, value_ref, parent_ref)
-			if cls.jsvalue_is_typed_array(None, context_ref, value_ref):
-				obj = javascript_typed_array(obj, None, context_ref, value_ref)
-			return obj
+			return cls.jsobjectref_to_py(context_ref, value_ref, parent_ref)
 		raise NotImplementedError("Unknown value_ref type")
 
 	@classmethod
@@ -1119,7 +1153,7 @@ class jscore:
 		if objc.ns_subclass_of(value, cls.JSScript):
 			raise Exception("JSScript")
 		# convert
-		if isinstance(value, javascript_value_converter):
+		if isinstance(value, javascript_type_base):
 			return value.to_jsvalueref(context_ref)
 		if isinstance(value, bool):
 			return cls.JSValueMakeBoolean(context_ref, value)
@@ -1204,7 +1238,7 @@ class jscore:
 			return cls.JSValue.valueWithUndefinedInContext_(context)
 		if objc.ns_subclass_of(value, jscore.JSValue) or objc.ns_subclass_of(value, jscore.JSScript):
 			return value # pass back jsvalue instances as-is
-		if isinstance(value, javascript_value_converter):
+		if isinstance(value, javascript_type_base):
 			return value.to_jsvalue(context)
 		if isinstance(value, bool):
 			return cls.JSValue.valueWithBool_inContext_(value, context)
@@ -1478,59 +1512,155 @@ class javascript_value(javascript_value_base):
 		
 	def __invert__(self):
 		return self.jsvalue
+		
+class javascript_type_base:
+	@classmethod
+	def mixin(cls, typ):
+		members = set(dir(typ))
+		class javascript_type_mixin(cls):
+			def __init__(self, value):
+				javascript_type_base.__init__(self, value, typ)
 
-class javascript_value_converter:
-	def __init__(self, value):
-		self.value = value
+		members -= set(dir(javascript_type_mixin))
+		def javascript_type_mixin_method(self, method, *args, **kwargs):
+			return method(self.py_value, *args, **kwargs)
+	
+		for member in members:
+			attr = getattr(typ, member)
+			if callable(attr):
+				attr = functools.partialmethod(javascript_type_mixin_method, attr)
+			setattr(javascript_type_mixin, member, attr)
+		return javascript_type_mixin
+	
+	def __init__(self, value, typ = None):
+		self.___value___ = value
+		self.___type___ = typ
+		
+	def __int__(self):
+		return int(self.py_value)
+		
+	def __float__(self):
+		return float(self.py_value)
+
+	def __repr__(self):
+		return repr(self.py_value)
+		
+	def __str__(self):
+		return str(self.py_value)
+			
+	@property
+	def py_value(self):
+		return self.___value___
+		
+	@property
+	def py_type(self):
+		return self.___type___
 		
 	def to_jsvalue(self, context):
-		raise NotImplementedError()
+		if isinstance(self.py_value, javascript_type_base):
+			return self.py_value.to_jsvalue(context)
+		else:
+			raise NotImplementedError()
 		
 	def to_jsvalueref(self, context_ref):
-		raise NotImplementedError()
+		if isinstance(self.py_value, javascript_type_base):
+			return self.py_value.to_jsvalueref(context_ref)
+		else:
+			raise NotImplementedError()
 
-class javascript_bigint(javascript_value_converter):
-	def to_jsvalue(self, context):
-		value = self.value
+class javascript_bigint(javascript_type_base):
+	def __init__(self, value, context_ref = None, value_ref = None, unsigned = None):
+		if objc.ns_subclass_of(value, jscore.JSValue):
+			context_ref, value_ref = jscore.jsvalue_get_refs(value)
+		if value_ref is not None:
+			ex = c_void_p(None)
+			if unsigned:
+				value = jscore.JSValueToUint64(context_ref, value_ref, byref(ex))
+				value = c_uint64(value)
+			else:
+				value = jscore.JSValueToInt64(context_ref, value_ref, byref(ex))
+				value = c_int64(value)
+		value = javascript_bigint.new(value)
+		super().__init__(value, javascript_bigint)
+
+	c_int64_limit = objc.c_int_limit(c_int64)
+	c_uint64_limit = objc.c_int_limit(c_uint64)
+	
+	@classmethod
+	def new(cls, value):
+		if isinstance(value, c_uint64) or isinstance(value, c_uint32) or isinstance(value, c_uint16) or isinstance(value, c_uint8):
+			return javascript_biguint_i(value.value)
+		if isinstance(value, c_int64) or isinstance(value, c_int32) or isinstance(value, c_int16) or isinstance(value, c_int8):
+			 return javascript_bigint_i(value.value)
+		if isinstance(value, int):
+			if value < cls.c_int64_limit.min or value > cls.c_uint64_limit.max:
+				raise ValueError(f"BigInt value underflow/overflow {value}.")
+			if value > cls.c_int64_limit.max:
+				return javascript_biguint_i(value)
+			return javascript_bigint_i(value)
+		if isinstance(value, float):
+			if value < cls.c_int64_limit.min or value > cls.c_uint64_limit.max:
+				raise ValueError(f"BigInt value underflow/overflow {value}.")
+			return javascript_bigint_f(value)
 		if isinstance(value, str):
-			return jscore.JSValue.valueWithNewBigIntFromString_inContext_(ns(value), context)
-		elif isinstance(value, float):
-			value = round(value)
-			return jscore.JSValue.valueWithNewBigIntFromDouble_inContext_(c_double(value), context)
+			return javascript_bigint_s(value)
+		raise ValueError(f"Unhandled BigInt value: {value} ({type(value)})")
+
+class javascript_bigint_i(javascript_bigint.mixin(int)):
+	def to_jsvalue(self, context):
+		value = self.py_value
 		return jscore.JSValue.valueWithNewBigIntFromInt64_inContext_(c_int64(value), context)
 		
 	def to_jsvalueref(self, context_ref):
-		value = self.value
+		value = self.py_value
 		ex = c_void_p(None)
-		jsvalue_ref = None
-		if isinstance(value, str):
-			str_ref = jscore.str_to_jsstringref(value)
-			jsvalue_ref = jscore.JSBigIntCreateWithString(context_ref, str_ref, byref(ex))
-		elif isinstance(value, float):
-			value = round(value)
-			jsvalue_ref = jscore.JSBigIntCreateWithDouble(context_ref, c_double(value), byref(ex))
-		else:
-			jsvalue_ref = jscore.JSBigIntCreateWithInt64(context_ref, c_int64(value), byref(ex))
+		jsvalue_ref = jscore.JSBigIntCreateWithInt64(context_ref, c_int64(value), byref(ex))
 		if jsvalue_ref is None and ex is not None:
 			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
 		return jsvalue_ref
-
-class javascript_biguint(javascript_bigint):
+		
+class javascript_biguint_i(javascript_bigint.mixin(int)):
 	def to_jsvalue(self, context):
-		value = self.value
-		if isinstance(value, int):
-			return jscore.JSValue.valueWithNewBigIntFromUInt64_inContext_(c_uint64(value), context)
-		return super().to_jsvalue(context)
+		value = self.py_value
+		return jscore.JSValue.valueWithNewBigIntFromUInt64_inContext_(c_uint64(value), context)
 		
 	def to_jsvalueref(self, context_ref):
-		value = self.value
+		value = self.py_value
 		ex = c_void_p(None)
-		if isinstance(value, int):
-			jsvalue_ref = jscore.JSBigIntCreateWithUInt64(context_ref, c_uint64(value), byref(ex))
-			if jsvalue_ref is None and ex is not None:
-				raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
-			return jsvalue_ref
-		return super().to_jsvalueref(context_ref)
+		jsvalue_ref = jscore.JSBigIntCreateWithUInt64(context_ref, c_uint64(value), byref(ex))
+		if jsvalue_ref is None and ex is not None:
+			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
+		return jsvalue_ref
+		
+class javascript_bigint_f(javascript_bigint.mixin(float)):
+	def to_jsvalue(self, context):
+		value = self.py_value
+		value = round(value)
+		return jscore.JSValue.valueWithNewBigIntFromDouble_inContext_(c_double(value), context)
+		
+	def to_jsvalueref(self, context_ref):
+		value = self.py_value
+		ex = c_void_p(None)
+		value = round(value)
+		jsvalue_ref = jscore.JSBigIntCreateWithDouble(context_ref, c_double(value), byref(ex))
+		if jsvalue_ref is None and ex is not None:
+			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
+		return jsvalue_ref
+		
+class javascript_bigint_s(javascript_bigint.mixin(str)):
+	def to_jsvalue(self, context):
+		value = self.py_value
+		return jscore.JSValue.valueWithNewBigIntFromString_inContext_(ns(value), context)
+		
+	def to_jsvalueref(self, context_ref):
+		value = self.py_value
+		ex = c_void_p(None)
+		str_ref = jscore.str_to_jsstringref(value)
+		jsvalue_ref = jscore.JSBigIntCreateWithString(context_ref, str_ref, byref(ex))
+		jscore.jsstringref_release(str_ref)
+		if jsvalue_ref is None and ex is not None:
+			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
+		return jsvalue_ref
 
 class javascript_list(list):
 	def __getitem__(self, index):
@@ -1586,7 +1716,7 @@ class javascript_symbol:
 class javascript_object_value_base(javascript_value_base):
 	def __init__(self, obj, jsvalue = None, context_ref = None, value_ref = None):
 		self.___obj___ = obj
-		javascript_value_base.__init__(self, jsvalue, context_ref, value_ref)
+		super().__init__(jsvalue, context_ref, value_ref)
 		self._init_()
 		
 	def _init_(self):
@@ -1612,7 +1742,9 @@ class javascript_object_value_base(javascript_value_base):
 
 class javascript_typed_array_iter:
 	def __init__(self, ptr, length, item_type = c_uint8):
-		self._ptr = cast(ptr,c_void_p)
+		self._ptr = ptr
+		if self._ptr is not None:
+			self._ptr = cast(self._ptr, c_void_p)
 		self._index = 0
 		self._length = length
 		self._item_type = item_type
@@ -1659,7 +1791,18 @@ class javascript_typed_array(javascript_object_value_base):
 			return c_uint16
 		#if jstype == jscore.kJSTypedArrayTypeNone: 
 		return None # invalid / not a typed array 
-	
+
+	def _init_(self):
+		context_ref, value_ref = jscore.jsvalue_get_refs(~self)
+		ex = c_void_p(None)
+		self._jstype = jscore.JSValueGetTypedArrayType(context_ref, value_ref, byref(ex))
+		self._item_type = javascript_typed_array.get_ctype(self._jstype)
+		self._length = jscore.JSObjectGetTypedArrayByteLength(context_ref, value_ref, byref(ex))
+		self._ptr = jscore.JSObjectGetTypedArrayBytesPtr(context_ref, value_ref, byref(ex))
+		if self._ptr is not None:
+			self._ptr = cast(self._ptr, c_void_p)
+		super()._init_()
+		
 	def __repr__(self):
 		items = str(list(self))
 		obj = super().__repr__()
@@ -1667,29 +1810,36 @@ class javascript_typed_array(javascript_object_value_base):
 	
 	def __iter__(self):
 		return self._new_iter()
-
-	def _new_iter(self, item_type = None):
-		context_ref, value_ref = jscore.jsvalue_get_refs(~self)
-		ex = c_void_p(None)
-		jstype = jscore.JSValueGetTypedArrayType(context_ref, value_ref, byref(ex))
-		if ex.value is not None:
-			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
+		
+	def __getitem__(self, key):
+		if isinstance(key, int):
+			return self._get_item(key, self._item_type)
+		raise KeyError(f"Invalid item key {key}")
+	
+	def _get_item(self, index, item_type = None):
 		if item_type is None:
-			item_type = javascript_typed_array.get_ctype(jstype)
-		if jstype == jscore.kJSTypedArrayTypeNone or item_type is None:
+			item_type = self._item_type
+		if self._jstype == jscore.kJSTypedArrayTypeNone or item_type is None:
 			raise ValueError("Javascript Object is not a TypedArray.")
-		length = jscore.JSObjectGetTypedArrayByteLength(context_ref, value_ref, byref(ex))
-		if ex.value is not None:
-			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
-		ptr = jscore.JSObjectGetTypedArrayBytesPtr(context_ref, value_ref, byref(ex))
-		if ex.value is not None:
-			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
-		return javascript_typed_array_iter(ptr, length, item_type)
+		if index < 0:
+			index = self._length + index
+		if index < 0 or index + sizeof(item_type) >= self.length:
+			raise KeyError(f"Index {index} out of range or item would overflow outside array.")
+		if self._ptr is None:
+			raise ValueError("TypedArray buffer pointer is null")
+		addr = self._ptr.value + index
+		value = item_type.from_address(addr)
+		return value
+	
+	def _new_iter(self, item_type = None):
+		if item_type is None:
+			item_type = self._item_type
+		if self._jstype == jscore.kJSTypedArrayTypeNone or item_type is None:
+			raise ValueError("Javascript Object is not a TypedArray.")
+		return javascript_typed_array_iter(self._ptr, self._length, item_type)
 
 	def to_bytes(self):
-		context_ref, value_ref = jscore.jsvalue_get_refs(~self)
-		ex = c_void_p(None)
-		length = jscore.JSObjectGetTypedArrayByteLength(context_ref, value_ref, byref(ex))
+		length = self._length
 		if length < 1:
 			return bytes()
 		buffer_array = (c_uint8 * length)()
@@ -1700,19 +1850,15 @@ class javascript_typed_array(javascript_object_value_base):
 		dst = cast(dst, c_void_p)
 		if dst.value is None:
 			raise ValueError("Target address pointer is null.")
-		if count == 0:
-			return 0
-		context_ref, value_ref = jscore.jsvalue_get_refs(~self)
-		ex = c_void_p(None)
 		if count is None:
-			count = jscore.JSObjectGetTypedArrayByteLength(context_ref, value_ref, byref(ex))
-			if ex.value is not None:
-				raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
+			count = self._length
 		if count == 0:
 			return 0
-		ptr = jscore.JSObjectGetTypedArrayBytesPtr(context_ref, value_ref, byref(ex))
-		if ex.value is not None:
-			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
+		if self._ptr is None:
+			raise ValueError("TypedArray buffer pointer is null")
+		if offset < 0 or offset >= self._length:
+			raise ValueError(f"Offset {offset} out of range or would overflow outside array.")
+		ptr = self._ptr
 		ptr = cast(cast(ptr, c_void_p).value + offset, c_void_p)
 		memmove(dst, ptr, count)
 		return count
@@ -3920,7 +4066,7 @@ class wasm_memory_view:
 		return self.view.getBigUint64(offset, self.getter_endianess(littleEndian))
 
 	def setBigUint64(self, offset, value, littleEndian = None):
-		self.view.setBigUint64(offset, javascript_biguint(value), self.setter_endianess(littleEndian))
+		self.view.setBigUint64(offset, javascript_bigint(value), self.setter_endianess(littleEndian))
 		return offset + 8
 
 	def getFloat16(self, offset, littleEndian = None):
@@ -4688,7 +4834,7 @@ if __name__ == '__main__':
 		arrayMatch = None
 		objectMatch = None
 	
-		def valueMatch(expected, value, values = {}, repr = False):
+		def valueMatch(expected, value, values = {}, strcmp = False):
 			if expected is None:
 				return value is None
 			if expected is javascript_value.undefined:
@@ -4702,16 +4848,16 @@ if __name__ == '__main__':
 					return False
 				return arrayMatch(expected, value)
 			elif expected is not value and expected != value:
-				if repr and not isinstance(value,str):
-					return expected == str(value)
 				if callable(expected):
 					expected = expected()
 					values["expected"] = expected
-					return valueMatch(expected, value, repr, values)
+					return valueMatch(expected, value, values, strcmp)
 				if callable(value):
 					value = value()
 					values["value"] = value
-					return valueMatch(expected, value, repr, values)
+					return valueMatch(expected, value, values, strcmp)
+				if strcmp:
+					return repr(expected) == repr(value) or str(expected) == str(value)
 				return False
 			return True
 	
@@ -4760,6 +4906,10 @@ if __name__ == '__main__':
 				expected = values["expected"]
 				value = values["value"]
 				print(f"Expected: {expected}\nActual: {value}\nPassed: {match}")
+				strcmp = kwargs.get("strcmp", False)
+				if strcmp:
+					print(f"Expected Type: {type(expected)}\nExpected Repr: {repr(expected)}\nExpected String: {str(expected)}")
+					print(f"Value Type: {type(value)}\nValue Repr: {repr(value)}\nValue String: {str(value)}")
 			print("-" * 35)
 			return value
 
@@ -4775,6 +4925,8 @@ if __name__ == '__main__':
 		eval("1.1 + 1.1", 2.2)
 		
 		eval("1.02", 1.02)
+		
+		eval("BigInt(1);", 1)
 		
 		eval("false", False)
 		
@@ -4826,8 +4978,8 @@ if __name__ == '__main__':
 		eval("new Float32Array([0,97,115,109,1,0,0,0]);")
 		eval("new Float64Array([0,97,115,109,1,0,0,0]);")
 		
-		eval("new BigUint64Array([]);")
-		eval("new BigInt64Array([]);")
+		eval("new BigUint64Array([BigInt(0),BigInt(97),BigInt(115),BigInt(109),BigInt(1),BigInt(0),BigInt(0),BigInt(0)]);")
+		eval("new BigInt64Array([BigInt(0),BigInt(97),BigInt(115),BigInt(109),BigInt(1),BigInt(0),BigInt(0),BigInt(0)]);")
 		
 		header("objects")
 		eval('const obj = { "str": "str", "int": 1, "float": 1.4, "obj":{ "hello": "world"} }; obj;', {"str":"str", "int":1, "float": 1.4, "obj": {"hello": "world"}})
