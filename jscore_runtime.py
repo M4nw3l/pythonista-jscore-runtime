@@ -3335,10 +3335,14 @@ class wasm_component:
 	def memory_view(self):
 		return self.env.memory_view
 	
-	def _error_handler(self, func, func_name, component_type):
-		def error_handler(*args, **kwargs):
+	def _wrap_handler(self, func, func_name, component_type):
+		def _handler(*args, **kwargs):
 			try:
 				log.debug(f"call wasm_component {component_type}.{func_name}: {args} {kwargs}")
+				args = list(args)
+				for i in range(len(args)):
+					if isinstance(args[i], javascript_bigint):
+						args[i] = int(args[i])
 				err = func(*args, **kwargs)
 				if err is None:
 					err = wasi_err.success
@@ -3354,7 +3358,7 @@ class wasm_component:
 					ex = e.ex
 				log.exception(f"Error in wasm_component {component_type}.{func_name}: {err.name}, {err} {ex}")
 				return err # we need to return a failure code to wasm if an error or exception is not otherwise handled
-		return error_handler
+		return _handler
 	
 	def _wrap_handlers(self):
 		class _exclude_members(wasm_component):
@@ -3365,7 +3369,7 @@ class wasm_component:
 		for attr_name in attr_names:
 			attr = getattr(self, attr_name)
 			if callable(attr):
-				setattr(self, attr_name, self._error_handler(attr, attr_name, component_type))
+				setattr(self, attr_name, self._wrap_handler(attr, attr_name, component_type))
 
 # common
 class wasi_err(enum.IntEnum):
@@ -4098,14 +4102,14 @@ class wasm_memory_view:
 		return self.setter_littleEndian
 	
 	def getBigInt64(self, offset, littleEndian = None):
-		return self.view.getBigInt64(offset, self.getter_endianess(littleEndian))
+		return int(self.view.getBigInt64(offset, self.getter_endianess(littleEndian)))
 
 	def setBigInt64(self, offset, value, littleEndian = None):
 		self.view.setBigInt64(offset, javascript_bigint(value), self.setter_endianess(littleEndian))
 		return offset + 8
 
 	def getBigUint64(self, offset, littleEndian = None):
-		return self.view.getBigUint64(offset, self.getter_endianess(littleEndian))
+		return int(self.view.getBigUint64(offset, self.getter_endianess(littleEndian)))
 
 	def setBigUint64(self, offset, value, littleEndian = None):
 		self.view.setBigUint64(offset, javascript_bigint(value), self.setter_endianess(littleEndian))
