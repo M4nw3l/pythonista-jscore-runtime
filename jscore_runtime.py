@@ -3666,29 +3666,20 @@ class wasi_http(wasm_component):
 class wasi_snapshot_preview1(wasm_component):
 
 	def args_get(self, argv, argv_buf):
-		offset = argv_buf
-		for i in range(len(self.env.args)):
-			self.memory_view.setUint32(argv + 4 * i, offset)
-			offset = self.memory_view.setString(offset, self.env.args[i])
+		offsets = self.memory_view.setArray("<s", argv_buf, self.env.args)
+		self.memory_view.setArray("<I", argv, offsets)
 
 	def args_sizes_get(self, count, size):
 		self.memory_view.setUint32(count, len(self.env.args))
 		self.memory_view.setUint32(size, len("".join(self.env.args))+len(self.env.args))
 
 	def environ_get(self, environ, environ_buf):
-		offset = environ_buf
-		i = 0
-		for k, v in self.env.vars.items():
-			self.memory_view.setUint32(environ + 4 * i, offset)
-			offset = self.memory_view.setString(offset, f"{k}={v}")
-			i += 1
+		offsets = self.memory_view.setArray("<s", environ_buf, map(lambda i: f"{i[0]}={i[1]}", self.env.vars.items()))
+		self.memory_view.setArray("<I", environ, offsets)
 
 	def environ_sizes_get(self, count, size):
 		self.memory_view.setUint32(count, len(self.env.vars))
-		sz = 0
-		for k,v in self.env.vars.items():
-			sz += len(k) + len(v) + 2 # 2 bytes for = and zero terminator
-		self.memory_view.setUint32(size, sz)
+		self.memory_view.setUint32(size, sum(map(lambda i: len(i[0])+len(i[1])+2, self.env.vars.items()))) # +2 for = and null byte
 
 	def clock_res_get(self, id, timestamp):
 		res = self.env.clock.get_res(id)
@@ -3716,11 +3707,11 @@ class wasi_snapshot_preview1(wasm_component):
 	def fd_fdstat_get(self, fd, buffer):
 		fd = self.env.get_fd(fd)
 		fdstat = fd.fdstat()
-		buffer = self.memory_view.setUint16(buffer, fdstat.fs_filetype) # 8 bits padding
-		# 16bits appears to be padding from other implementations not sure whether set in hi or lo bytes
-		buffer = self.memory_view.setUint32(buffer, fdstat.fs_flags) 
-		buffer = self.memory_view.setUint64(buffer, fdstat.fs_rights_base)
-		buffer = self.memory_view.setUint64(buffer, fdstat.fs_rights_inheriting)
+		# filetype: 8 bits padding
+		# flags: 16bits appears to be padding from other implementations assume flags set in lo bytes
+		# rights are 64bit flags values
+		data = struct.pack("<HIQQ", fdstat.fs_filetype, fdstat.fs_flags, fdstat.fs_rights_base, fdstat.fs_rights_inheriting)
+		self.memory_view.setBytes(buffer, data)
 
 	def fd_fdstat_set_flags(self, fd, fs_flags):
 		fd = self.env.get_fd(fd)
@@ -3733,14 +3724,10 @@ class wasi_snapshot_preview1(wasm_component):
 	def fd_filestat_get(self, fd, buffer):
 		fd = self.env.get_fd(fd)
 		filestat = fd.filestat()
-		buffer = self.memory_view.setUint32(buffer, filestat.device) # sizes need checking
-		buffer = self.memory_view.setUint32(buffer, filestat.ino)
-		buffer = self.memory_view.setUint32(buffer, filestat.filetype)
-		buffer = self.memory_view.setUint32(buffer, filestat.nlink)
-		buffer = self.memory_view.setUint64(buffer, filestat.size)
-		buffer = self.memory_view.setUint64(buffer, filestat.atim)
-		buffer = self.memory_view.setUint64(buffer, filestat.mtim)
-		buffer = self.memory_view.setUint64(buffer, filestat.ctim)
+		# sizes need checking
+		data = struct.pack("<IIII", filestat.device, filestat.ino, filestat.filetype, filestat.nlink)
+		data += struct.pack("<QQQQ", filestat.size, filestat.atim, filestat.mtim, filestat.ctim)
+		self.memory_view.setBytes(buffer, data)
 
 	def fd_filestat_set_size(self, fd, size):
 		fd = self.env.get_fd(fd)
@@ -3753,8 +3740,10 @@ class wasi_snapshot_preview1(wasm_component):
 	def fd_prestat_get(self, fd, buffer):
 		try:
 			path = self.env.get_fd(fd).path
-			buffer = self.memory_view.setUint32(buffer, 0) # dir
-			buffer = self.memory_view.setUint32(buffer, len(str(path))) # length without null terminator?
+			# type: 0 (dir)
+			# length: path length (without null terminator?)
+			data = struct.pack("<II", 0, len(str(path)))
+			self.memory_view.setBytes(buffer, data)
 		except wasi_error as e:
 			return e.err # suppress traceback as this determines maximum preopened fd.
 
@@ -3812,10 +3801,7 @@ class wasi_snapshot_preview1(wasm_component):
 		pos = stream.tell()
 		stream.seek(offset, os.SEEK_SET)
 		read = 0
-		for i in range(iovs_count):
-			iov = iovs + (i * 8)
-			ptr = self.memory_view.getUint32(iov)
-			size = self.memory_view.getUint32(iov+4)
+		for ptr, size in self.memory_view.unpack_iter("<II", iovs, iovs_count):
 			data = stream.read(size)
 			count = min(len(data),size)
 			if isinstance(data, str) or isinstance(stream, io.StringIO):
@@ -3829,10 +3815,7 @@ class wasi_snapshot_preview1(wasm_component):
 	def fd_read(self, fd, iovs, iovs_count, offset):
 		stream = self.env.get_stream(fd)
 		read = 0
-		for i in range(iovs_count):
-			iov = iovs + (i * 8)
-			ptr = self.memory_view.getUint32(iov)
-			size = self.memory_view.getUint32(iov+4)
+		for ptr, size in self.memory_view.unpack_iter("<II", iovs, iovs_count):
 			data = stream.read(size)
 			count = len(data)
 			if isinstance(data, str) or isinstance(stream, io.StringIO):
@@ -3845,10 +3828,7 @@ class wasi_snapshot_preview1(wasm_component):
 	def fd_write(self, fd, iovs, iovs_count, offset):
 		stream = self.env.get_stream(fd)
 		written = 0
-		for i in range(iovs_count):
-			iov = iovs + (i * 8)
-			ptr = self.memory_view.getUint32(iov)
-			size = self.memory_view.getUint32(iov+4)
+		for ptr, size in self.memory_view.unpack_iter("<II", iovs, iovs_count):
 			# we need to do this better probably
 			if isinstance(stream, io.StringIO):
 				text = self.memory_view.getString(ptr, size) 
@@ -3864,10 +3844,7 @@ class wasi_snapshot_preview1(wasm_component):
 		pos = stream.tell()
 		stream.seek(offset, os.SEEK_SET)
 		written = 0
-		for i in range(iovs_count):
-			iov = iovs + (i * 8)
-			ptr = self.memory_view.getUint32(iov)
-			size = self.memory_view.getUint32(iov+4)
+		for ptr, size in self.memory_view.unpack_iter("<II", iovs, iovs_count):
 			# we need to do this better probably
 			if isinstance(stream, io.StringIO):
 				text = self.memory_view.getString(ptr, size) 
@@ -3890,14 +3867,10 @@ class wasi_snapshot_preview1(wasm_component):
 		fd = self.env.get_fd(fd)
 		path = self.memory_view.getString(path_ptr, path_size)
 		filestat = fd.path_filestat(flags, path)
-		buffer = self.memory_view.setUint32(buffer, filestat.device) # sizes need checking
-		buffer = self.memory_view.setUint32(buffer, filestat.ino)
-		buffer = self.memory_view.setUint32(buffer, filestat.filetype)
-		buffer = self.memory_view.setUint32(buffer, filestat.nlink)
-		buffer = self.memory_view.setUint64(buffer, filestat.size)
-		buffer = self.memory_view.setUint64(buffer, filestat.atim)
-		buffer = self.memory_view.setUint64(buffer, filestat.mtim)
-		buffer = self.memory_view.setUint64(buffer, filestat.ctim)
+		# sizes need checking
+		data = struct.pack("<IIII", filestat.device, filestat.ino, filestat.filetype, filestat.nlink)
+		data += struct.pack("<QQQQ", filestat.size, filestat.atim, filestat.mtim, filestat.ctim)
+		self.memory_view.setBytes(buffer, data)
 
 	def path_filestat_set_times(self, fd, flags, path_ptr, path_size, atim, mtim, fst_flags):
 		fd = self.env.get_fd(fd)
@@ -4001,10 +3974,7 @@ class wasi_snapshot_preview1(wasm_component):
 		
 	def poll_oneoff(self, subscriptions_in, events_out, nsubscriptions, nevents):
 		events = []
-		for i in range(nsubscriptions):
-			sub_ptr = subscriptions_in + (i * 16)
-			user_data = self.memory_view.getUint64(sub_ptr)
-			sub_type = self.memory_view.getUint8(sub_ptr+8)
+		for user_data, sub_type in self.memory_view.unpack_iter("<QB", subscriptions_in, nsubscriptions):
 			if sub_type == 0: # clock
 				pass
 			elif sub_type == 1: # fd_read
@@ -4014,7 +3984,6 @@ class wasi_snapshot_preview1(wasm_component):
 		for event in events:
 			pass
 		self.memory_view.setUint32(nevents, len(events))
-			
 
 	def proc_exit(self, rval):
 		self.env.process_exit(rval)
@@ -4032,8 +4001,7 @@ class wasi_snapshot_preview1(wasm_component):
 		if buf_len == 0:
 			return wasi_err.success
 		data = secrets.token_bytes(buf_len)
-		for i in range(buf_len):
-			self.memory_view.setUint8(buf+i, data[i])
+		self.memory_view.setBytes(buf, data, buf_len)
 
 	def sock_accept(self, fd, flags):
 		return wasi_err.notcapable
@@ -4233,6 +4201,67 @@ class wasm_memory_view:
 		data = bytes(data[:length])
 		self._allocator.memory_set_bytes(self.memory, offset, data)
 		return offset + length
+		
+	def unpack(self, fmt, offset):
+		length = struct.calcsize(fmt)
+		data = self.getBytes(offset, length)
+		values = struct.unpack(fmt, data)
+		if len(values) == 1:
+			return values[0]
+		return values
+		
+	class _unpack_iter:
+		def __init__(self, fmt, size, length, data):
+			self.fmt = fmt
+			self.size = size
+			self.length = length
+			self.data = data
+			self.index = 0
+			
+		def __iter__(self):
+			self.index = 0
+			return self
+			
+		def __next__(self):
+			if self.index >= self.length:
+				raise StopIteration()
+			index = self.index
+			self.index += self.size
+			values = struct.unpack_from(self.fmt, self.data, index)
+			if len(values) == 1:
+				return values[0]
+			return values
+			
+	def unpack_iter(self, fmt, offset, count):
+		size = struct.calcsize(fmt)
+		length = size * count
+		data = self.getBytes(offset, length)
+		return self._unpack_iter(fmt, size, length, data)
+		
+	def getArray(self, fmt, offset, count):
+		return list(self.unpack_iter(fmt, offset, count))
+		
+	def setArray(self, fmt, offset, items):
+		# string arrays need special handling to avoid a byte order marker as we dont have to care about multibyte chars
+		stringArray = fmt[0] == "s" or fmt[1] == "s" or fmt[0] == "p" or fmt[1] == "p"
+		buffer = []
+		offsets = []
+		length = 0
+		for item in items:
+			data = b''
+			if stringArray:
+				offsets.append(offset + length) # calculate the current offset 
+				data = item.encode('utf8') + b'\0'
+			elif isinstance(item, tuple) or isinstance(item, list) or isinstance(item, set):
+				offsets.append(offset + length) # calculate the current offset 
+				data = struct.pack(fmt, *item)
+			else:
+				data = struct.pack(fmt, item) # definitely fixed size items 
+			length += len(data)
+			buffer.append(data)
+		buffer = b''.join(buffer)
+		self.setBytes(offset, buffer, length)
+		return offsets
 
 class wasm_mount:
 	def __init__(self, real_path, mount_path):
