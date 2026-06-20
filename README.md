@@ -13,7 +13,7 @@ The projects overall long term goals aim to support three core capabilities/feat
 - Extensive bi-directional type marshalling and conversion supporting primitives, functions, typed arrays, lists, dicts and complex objects.
 - Performant, efficient and accurate with values handled in round-tripable formats, and using direct low level memory access where applicable.
 - Comprehensive mapping of Apple's [JavascriptCore Objective-C API](https://developer.apple.com/documentation/javascriptcore?language=objc).
-- Zero dependencies, implented single file Python module, using just `objc-util` and the python standard library. 
+- Zero dependencies, implented as a single file Python module, using just `objc-util` and the python standard library. 
 
 ## Features - Unstable
 - WebAssembly System Interface (WASI) snapshot preview 1 now has partial support and passes a number of the official [WebAssembly/wasi-testsuite](https://github.com/WebAssembly/wasi-testsuite) tests. 
