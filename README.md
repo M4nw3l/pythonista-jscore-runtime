@@ -3,12 +3,34 @@
 JSCore Runtime Framework is an experiment in pushing the boundaries of the Python environment and language features in the [Pythonista 3 IDE](https://omz-software.com/pythonista/) and apps developed with it on iOS. 
 It is an extensive Python 3 mapping of the JavaScriptCore Objective-C and C-APIs via objc-util. Implementing closely analogous Python integrations, wrapping and interop for evaluating JavaScript and WebAssembly in the JavaScriptCore execution environment from Python 3 applications and scripts. Focused also from a point of view of being a serious attempt to extend vanilla Pythonista 3 to ultimately support Python packages and modules with compiled extensions that can be cross-compiled reliably into WebAssembly. 
 
-The projects overall long term goals aim to offer three core capabilities/features:
+The projects overall long term goals aim to support three core capabilities/features:
 - Evaluate/execute JavaScript and WebAssembly with seamless Python interop as a standalone library for Pythonista 3 based Python 3 apps.
 - Compile, bundle, import and run custom source code and third party components extensibly with WebAssembly and JavaScript.
 - Support Python packages/modules with extensions which can be cross-compiled to WebAssmembly from languages such as C.
 
-Currently, execution of both JavaScript and WebAssembly interoperating with Python is now thereabouts fully supported, with a mostly complete and pythonic wrapping API to interact with JavaScriptCore execution contexts/environments. The interface is close to stable, especially from a JavaScript perspective but is still evolving somewhat. The WebAssembly runtime is more experimental still and therefore likely to be subject to change.
+## Features - Stable
+- Powerfully extends Pythonista 3 with modern combined JavaScript and WebAssembly, interoperation and execution support.
+- Extensive bi-directional type marshalling and conversion supporting primitives, functions, typed arrays, lists, dicts and complex objects.
+- Performant, efficient and accurate with values handled in round-tripable formats, and using direct low level memory access where applicable.
+- Comprehensive mapping of Apple's [JavascriptCore Objective-C API](https://developer.apple.com/documentation/javascriptcore?language=objc).
+- Zero dependencies, implented single file Python module, using just `objc-util` and the python standard library. 
+
+## Features - Unstable
+- WebAssembly System Interface (WASI) snapshot preview 1 now has partial support and passes a number of the official [WebAssembly/wasi-testsuite](https://github.com/WebAssembly/wasi-testsuite) tests. 
+	- Python WASM components shimming from Python classes mechanism implemented with JavaScriptCore function callbacks. Imports may be satisfied with Python or JavaScript functions. 
+	- Folder mounting with near complete file system access to Pythonista's sandboxed file system with wasi fds (file descriptors) manipulation functions. (Note: Symlinks are not currently supported with `path_symlink`).
+	- System clocks passthrough to real iOS system clocks with Python `time` module, realtime, monotic, process_cputime and thread_cputime.(process_cputime and thread_cputime are equivalent due to implementation.)
+	- Obtain secure random bytes from `random_get` with `secrets.token_bytes`.
+- Run `.wasm` file executables with standard `_start` functions in simulated isolated process environments.
+	- Implemented with `threading.Thread` using a subprocess compatible interface.
+	- Supports passing program arguments, environment variables, standard streams stdin, stdout, stderr.
+- **Wasm/Wasi current limitations**
+	- Socket functions `sock_accept`, `sock_recv`, `sock_send` and `sock_shutdown` are not implemented currently. 
+	- Concurrent polling with `poll_oneoff` is not implented current affecting programs requiring `select` and/or `pselect` to function within the program and for asynchronous code, message loops and other polling applications. 
+	- Application binary interface(s) support is limited and not complete, imports may not be resolved correctly, complex programs may behave unexpectedly, or may not run at all or also crash Pythonista.
+	- Compiling/cross compiling applications for Pythonista is currently limited and/or has incomplete support. A reliable means of compiling WebAssembly / .wasm executables for Pythonista specifically hasn't yet been completely determined. 
+	- Some general advice would be keep compilation flags simple, avoid any extension flags and direct host memory optimisation or anything which would otherwise be restricted in iOS sandboxing. 
+	- Single file / statically linked executables are simplest to get running currently. Simple programs such as the wasi_testsuite tests, with .wasm executables that can be sourced freely online have been used for testing so far. WebAssembly is interpreted and run directly in JavaScriptCore, so it should be fairly close to compiling .wasm executables for browsers or other JavaScriptCore based runtimes. 
 
 A few (very) simple examples:
 
@@ -16,7 +38,7 @@ A few (very) simple examples:
 
 from jscore_runtime import *
 
-context = jscore.javascript()
+context = jscore.javascript() 
 
 context.eval('function hello_world () { return "hello world"; }')
 print(context.js.hello_world())
@@ -40,6 +62,11 @@ module.exports.exported_func()
 # output:
 # 42
 # (written to Pythonista's terminal via imported_func)
+
+# run .wasm program with _start function asynchronously in a new thread
+process = context.run_async('./program.wasm', 'args', 'for', 'program', env = {"envVar":"value"}, dirs = ['./preopen_dir'])
+# starts the process then returns a representation with a subprocess-like interface allowing interaction via stdin, stdout and stderr
+
 ```
 
 ## Installation
@@ -52,7 +79,8 @@ Or install with pip using pipTerminal from [Pythonista pip configration tool](ht
 pip install pythonista-jscore-runtime 
 ```
 
-Or download [jscore_runtime.py](https://github.com/M4nw3l/pythonista-jscore-runtime/blob/v0.0.7/jscore_runtime.py) from the latest v0.0.x release tag and copy to your site-packages folder.
+Or download [jscore_runtime.py](https://github.com/M4nw3l/pythonista-jscore-runtime/blob/v0.0.8/jscore_runtime.py) from the latest v0.0.x release tag and copy to your site-packages folder.
+
 
 ## Usage
 
@@ -60,24 +88,41 @@ Or download [jscore_runtime.py](https://github.com/M4nw3l/pythonista-jscore-runt
 JSCore Runtime supports both the context management and explicit create/destroy usage paradigms. 
 It provides singletons for convenience evaluation and while also allows more explicit management of multiple virtual machines and contexts with its class model.
 
-A runtime singleton can be obtained from the `jscore` static class.
+A runtime context singleton and optionally runtime singleton can be obtained from the `jscore` static class.
+
+```python
+context = jscore.javascript()
+
+# or shorthand
+context = jscore.js()
+
+
+# obtain javascript_runtime singleton
+runtime = jscore.runtime(javascript_runtime)
+```
+
+By default if no runtime class is specified a `javascript_runtime` with a virtal machine lifetime of the program is returned.
+
 ```python
 runtime = jscore.runtime()
 ```
-By default if no runtime class is specified a `javascript_runtime` with a virtal machine lifetime of the program is returned.
 
 A runtime class can also be instantiated independently. On creation it will contain a pointer to its own independent JSVirtualMachine instance.
+
 ```python
 runtime = javascript_runtime()
 ``` 
 
 A context is required to evaluate code. A context instance is onbtained from an existing runtime instance:
+
 ```python
 context = runtime.context()
 ```
+
 The context type matches the runtime type. e.g `javascript_runtime` returns `javascript_context` instances. Similarly to runtimes, contexts are independent of one another such that the state of one context is distinct to and isolated from another unless it is explictly configured for sharing via context groups. 
 
 A context may evaluate javascript with several javascript evaluation function variants:
+
 ```python
 # general purpose javascript string evaluation function
 context.eval(jsSourceCode) 
@@ -133,11 +178,50 @@ context.js.number = 10
 context.js.double = 1.1
 context.js.array = []
 context.js.object = {}
+
+context.js.biginteger = javascript_bigint(12345678910)
+
+```
+Typed arrays values are provided in direct access wrappers automatically and may be used efficiently as like Python collections.
+
+```python
+# typed arrays
+uint8Array = context.eval("new Uint8Array([0,97,115,109,1,0,0,0]);").value
+uint16Array = context.eval("new Uint16Array([0,97,115,109,1,0,0,0]);").value
+uint32Array = context.eval("new Uint32Array([0,97,115,109,1,0,0,0]);").value
+		
+int8Array = context.eval("new Int8Array([0,97,115,109,1,0,0,0]);").value
+int16Array = context.eval("new Int16Array([0,97,115,109,1,0,0,0]);").value
+int32Array = context.eval("new Int32Array([0,97,115,109,1,0,0,0]);").value
+		
+float32Array = context.eval("new Float32Array([0,97,115,109,1,0,0,0]);").value
+flot64Array = context.eval("new Float64Array([0,97,115,109,1,0,0,0]);").value
+		
+bigUint64Array = context.eval("new BigUint64Array([BigInt(1),BigInt(0),BigInt(0),BigInt(0)]);").value
+bigInt64Array = context.eval("new BigInt64Array([BigInt(1),BigInt(0),BigInt(0),BigInt(0)]);").value
+
+# index
+typedValue = typedArray[0]
+# typed value is returned as an equivalent ctype value 
+
+# iteration directly on values in memory
+for typedValue in typedArray:
+	pass
+
+# full javascript functions interface support
+slicedArray = typedArray.slice(1)
+
+# obtain raw bytes
+typedArrayBytes = typedArray.to_bytes()
+
+# copy as raw bytes 
+typedArray.copy_to(address)
 ```
 
 Python functions can be specified as functions callable from javascript:
 
 ```python
+context = jscore.js()
 
 def python_print(text):
 	print(text)
@@ -164,6 +248,7 @@ A function may also be created with javascript source:
 context.js.my_function = javascript_function.from_source('function() { return 1234; }')
 ```
 Defined javascript functions may also be called directly from Python:
+
 ```python
 context.js.my_function() # returns 1234
 ```
@@ -174,9 +259,15 @@ with files and byte arrays from Python. They efficiently load WebAssembly module
 
 To create a `wasm_context` a `wasm_runtime` instance needs to be created first. This currently works the same way as the `javascript_runtime`. 
 
-A singleton runtime instance, with a lifetime of the program, may be obtained from the `jscore.runtime` accessor.
+A singleton context and optional runtime instance, with a lifetime of the program, may be obtained from the `jscore` static class accessors.
 
 ```python
+context = jscore.webassembly()
+
+# or shorthand
+context = jscore.wasm()
+
+# obtain wasm_runtime singleton instance
 runtime = jscore.runtime(wasm_runtime)
 ```
 
@@ -184,15 +275,15 @@ Alternatively a `wasm_runtime` instance may also be created and managed independ
 
 ```python
 runtime = wasm_runtime()
-```
-
-A `wasm_context` may be obtained from runtime instance:
-
-```python
 context = runtime.context()
 ```
 
-Although a `wasm_context` may execute JavaScript and vice versa, `wasm_runtime` and `wasm_context` are designed to integrate Python with WebAssembly as a first class runtime, without need for any JavaScript by default, to load and call WebAssembly modules from Python. A `wasm_context` therefore focuses on loading `wasm_module` instances.
+A `wasm_context` is required to run WebAssembly from Python with more direct and efficient access. Its possible to run WebAssembly from just a `javascript_context` however this keeps the state more contained to Javascript and is therefore less convenient to use from Python. Needing more manual wire up and handling for imports / exports, WebAssembly system interface functions, execution blocking / thread management interacting with Python. 
+
+This more specialised `wasm_context` aims to solves these difficulties for a close integration with the Python environment when required. While it is still also a fully functional `javascript_context` too. By default one single JavaScriptCore JSVirtualMachine an JSContext is shared between singleton `javascript_runtime` and `wasm_runtime` instances.
+
+Although a `wasm_context` may execute JavaScript and vice versa, `wasm_runtime` and `wasm_context` are designed to integrate Python with WebAssembly as a first class runtime, with minimal need for any JavaScript by default, to load and call WebAssembly modules from Python. 
+A `wasm_context` therefore focuses on loading `wasm_module` instances for library functionality, and running simulated wasm executable processes as `wasm_process`instances which mimic subprocesses with a compatible interface.
 
 WebAssembly modules can be loaded from files or as raw bytes with the `wasm_module` class and `wasm_context.load_module` function.
 
@@ -202,6 +293,8 @@ module_bytes = wasm_module(b'\0asm\1\0\0\0'+b'[module_body_bytes]', 'optional_mo
 module_data = wasm_module([0, 97, 115, 109, 1, 0, 0, 0, ...], 'optional_module_name_or_path')
 
 module_instance = module_file
+
+context = jscore.wasm()
 context.load_module(module_instance)
 
 # once a module has been loaded its instance and exports are available from properties
@@ -227,6 +320,7 @@ module.imports.my_namespace.imported_func = javascript_function.from_source("fun
 
 # an ImportError is raised if load_module is called for modules expecting imports without functions 
 # for all of the expected imports specified.
+context = jscore.wasm()
 context.load_module(module)
 
 ```
@@ -273,15 +367,16 @@ An end to end example of loading and using a WebAssembly module from Pythonista 
 ```python
 
 from jscore_runtime import * 
-with (jscore.runtime(wasm_runtime) as runtime, runtime.context() as context):
-	# load module file
-	module = wasm_module.from_file('./simple.wasm')
-	# define imports
-	module.imports.my_namespace.imported_func = lambda v: print(v)
-	# load module into context
-	context.load_module(module)
-	# once loaded, a modules exports become available and may be invoked
-	module.exports.exported_func() # prints 42
+context = jscore.wasm()
+
+# load module file
+module = wasm_module.from_file('./simple.wasm')
+# define imports
+module.imports.my_namespace.imported_func = lambda v: print(v)
+# load module into context
+context.load_module(module)
+# once loaded, a modules exports become available and may be invoked
+module.exports.exported_func() # prints 42
 	
 # output: 42
 ```
@@ -289,6 +384,111 @@ with (jscore.runtime(wasm_runtime) as runtime, runtime.context() as context):
 
 
 Modules loading has been made to closely align with javascript with a couple of notable differences, firstly Python functions/callables may be used as imports as well as javascript functions. A fixed imports table is defined per `wasm_module` and `wasm_context`, imports must therefore be specified via the `wasm_module.imports`, module specific imports property, or `wasm_context.imports` context-wide imports property. A modules imports namespace always overrides any context-wide imports of the same matching structure and keys. 
+
+#### WebAssembly Processes Execution
+Compiled WebAssembly executable programs, having a `_start` function export, may now be run with limited support for WebAssembly System Interface (WASI) snapshot preview 1. A somewhat crude recursive dynamic dependency resolution based on module / file and function names is performed to load a runnable module with `_start` loading exports from any side-effect modules with `_init` beforehand currently. Ideally this would be fully dynamic lazy loading on invoking calls, however it is done up front currently for debugging.
+
+Mobile device environments like iOS and Pythonista do not ordinarily support running isolated processes with `subprocess` which would normally be availble to Python on a PC. Instead a simulation `wasm_process` with a `subprocess` compatible/complaint interface with a backing `threading.Thread` `wasm_process_thread` are used to implement this functionality instead.
+
+WebAssembly processes always run in association to a `wasm_context` and can be started from an existing `wasm_context`either asynchronously or synchronously. 
+
+To start a process asynchronously on a background thread use `wasm_context.run_async` as follows:
+
+```python
+context = jscore.wasm()
+
+# run .wasm program with _start function asynchronously in a new thread
+process = context.run_async('./program.wasm', 'args', 'for', 'program', env = {"envVar":"value"}, dirs = ['./preopen_dir'])
+# starts the process then returns a representation with a subprocess-like interface allowing interaction via stdin, stdout and stderr
+```
+To start a process synchronously on the current thread use `wasm_context.run` instead. 
+
+```python
+# run .wasm program with _start function synchronously (on the current thread)
+process = context.run('./program.wasm', 'args', 'for', 'program', env = {"envVar":"value"}, dirs = ['./preopen_dir'])
+# starts process and blocks current thread until execution is complete / terminated. 
+# The process representation is returned so exit code / termination state etc may be inspected
+# The full post execution state of stdin, stdout and stderr is also captured. 
+```
+Important note: This function is more inteded for implementions using custom thread management. It will execute the .wasm executable on Pythonistas main thread by default, so use `run_async` if this is not desirable, freezes or deadlocks! 
+
+The `wasm_process` class provides the following interface:
+
+```python
+class wasm_process:
+	def __init__(self, env, module, args, kwargs, callback = None):
+		self.env = env
+		self.module = module
+		self.args = args
+		self.kwargs = kwargs
+		self.thread = None
+		self.exception = None
+		self.killing = False
+		self.killed = False
+		self.running = False
+		self.callback = callback
+		self.lock = threading.RLock()
+		self.awaiter = threading.Condition(self.lock)
+		self.env.init_process(self)
+	
+	@property
+	def module_path(self):
+		return self.module.path
+	
+	@property
+	def exit_code(self):
+		return self.env.exit_code
+		
+	@exit_code.setter
+	def exit_code(self, value):
+		self.env.exit_code = value
+	
+	@property
+	def returncode(self):
+		if self.exit_code is None:
+			return 0
+		return self.exit_code
+		
+	@property
+	def stdin(self):
+		return self.env.stdin
+		
+	@property
+	def stdout(self):
+		return self.env.stdout
+		
+	@property
+	def stderr(self):
+		return self.env.stderr
+	
+	def run(self):
+		pass
+	
+	def run_async(self):
+		pass
+
+	def communicate(self, stdin = None, timeout = None):
+		pass
+		
+	def notify(self):
+		pass
+			
+	def notify_all(self):
+		pass
+
+	def kill(self, *args, **kwargs):
+		pass
+		
+	def wait(self, timeout = None, join = False):
+		pass
+		
+	def wait_until_exit(self, timeout = None):
+		pass
+		
+	def send_signal(self, sig):
+		pass
+```
+A `wasm_process` instance is intended to be interchangable and be same equivalent to `subprocess` based execution as can be observed in Python WebAssembly framework implementations inteded for desktop which perform execution on the system directly running a self contained runtime command program like [Wasmtime](https://github.com/bytecodealliance/wasmtime) and [Wasmer](https://github.com/wasmerio/wasmer). Except using JavaScriptCore as the WebAssembly interpreter and execution engine. 
 
 ---
 
@@ -298,7 +498,6 @@ Disclaimer: DeepWiki documentation is AI generated, some inaccuracies or incorre
 Further content with more agent guidance and wrangling to attempt to improve this documentations accuracy will be added on-going.
 
 ## Known issues
-- WASI preview 1 and preview 2/3 component model support is a work in progress, it is currently extremely unstable, experimental and incomplete. It should not be considered at all as ready for dev or use currently.
 - Loading javascript files from remote sources / cdns etc is not implemented (yet).
 - Modules and scripts loading may not work correctly for some javascript libraries and they may need manual adjustments to work correctly.
 - ModulesLoaderDelegate is using a private protcol / api as there is no other way to access the functionality otherwise.
