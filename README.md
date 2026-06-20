@@ -410,6 +410,13 @@ process = context.run('./program.wasm', 'args', 'for', 'program', env = {"envVar
 # The process representation is returned so exit code / termination state etc may be inspected
 # The full post execution state of stdin, stdout and stderr is also captured. 
 ```
+Program arguments are provided as the `*args` array.
+Named keyword arguments are used to pass additional configuration for the wasm environment.
+
+- `env` a dict/object representing the environment variarbles state
+- `dirs` a list of directory paths to be pre-opened and mounted into the wasm environment.
+	- A directories list of at least one directory must be provided for WebAssembly to have access to Pythonistas filesystem as specified.
+
 Important note: This function is more inteded for implementions using custom thread management. It will execute the .wasm executable on Pythonistas main thread by default, so use `run_async` if this is not desirable, freezes or deadlocks! 
 
 The `wasm_process` class provides the following interface:
