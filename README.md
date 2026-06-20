@@ -6,7 +6,9 @@ It is an extensive Python 3 mapping of the JavaScriptCore Objective-C and C-APIs
 The projects overall long term goals aim to support three core capabilities/features:
 - Evaluate/execute JavaScript and WebAssembly with seamless Python interop as a standalone library for Pythonista 3 based Python 3 apps.
 - Compile, bundle, import and run custom source code and third party components extensibly with WebAssembly and JavaScript.
-- Support Python packages/modules with extensions which can be cross-compiled to WebAssmembly from languages such as C.
+- Support Python packages/modules with extensions which can be cross-compiled to WebAssmembly from languages such as C. 
+
+Aiming also to be compatible with WebAssembly in Python 3 ongoing through backporting/compliance/support for proposed language-functionality such as [PEP-0816](https://peps.python.org/pep-0816/). Ideally Python libraries with extension modules ultimately become installable, through as close to a standard mechanism as possible, importable into Pythonista 3 as-is without modification or with only minimal changes and boilerplate.
 
 ## Features - Stable
 - Powerfully extends Pythonista 3 with modern combined JavaScript and WebAssembly, interoperation and execution support.
@@ -16,7 +18,7 @@ The projects overall long term goals aim to support three core capabilities/feat
 - Zero dependencies, implented as a single file Python module, using just `objc-util` and the python standard library. 
 
 ## Features - Unstable
-- WebAssembly System Interface (WASI) snapshot preview 1 now has partial support and passes a number of the official [WebAssembly/wasi-testsuite](https://github.com/WebAssembly/wasi-testsuite) tests. 
+- WebAssembly System Interface at [(WASI) snapshot preview 1](https://github.com/WebAssembly/WASI/tree/wasi-0.1) now has partial support and passes a number of the official [WebAssembly/wasi-testsuite](https://github.com/WebAssembly/wasi-testsuite) tests. 
 	- Python WASM components shimming from Python classes mechanism implemented with JavaScriptCore function callbacks. Imports may be satisfied with Python or JavaScript functions. 
 	- Folder mounting with near complete file system access to Pythonista's sandboxed file system with wasi fds (file descriptors) manipulation functions. (Note: Symlinks are not currently supported with `path_symlink`).
 	- System clocks passthrough to real iOS system clocks with Python `time` module, realtime, monotic, process_cputime and thread_cputime.(process_cputime and thread_cputime are equivalent due to implementation.)
@@ -495,7 +497,147 @@ class wasm_process:
 	def send_signal(self, sig):
 		pass
 ```
+
 A `wasm_process` instance is intended to be interchangable and be same equivalent to `subprocess` based execution as can be observed in Python WebAssembly framework implementations inteded for desktop which perform execution on the system directly running a self contained runtime command program like [Wasmtime](https://github.com/bytecodealliance/wasmtime) and [Wasmer](https://github.com/wasmerio/wasmer). Except using JavaScriptCore as the WebAssembly interpreter and execution engine. 
+
+Processes contain a reference to their `wasm_module` code and a `wasm_env` instance representing the isolated process environments system state.
+A `wasm_env` provides access to memory, representations of standard streams `stdin`, `stdout` and `stderr`, program arguments, environment variables and the filesystem alongside tracking file descriptors. It used to hold and bridge the process memory and system state between Wasm and Python via WebAssembly system interface implemented as `wasm_component`Python class instances. 
+
+Isolated process environments provided by `wasm_env` instances have the following interface.
+
+```python
+class wasm_env:
+	def __init__(self, parent = None, args = [], kwargs = {}, allocator = None):
+		self.parent = parent # parent wasm env
+		self.args = args
+		self.kwargs = kwargs
+		self._vars = kwargs.get("env", {})
+		self._dirs = kwargs.get("dirs", [])
+		self.world = kwargs.get("world", None)
+		self.version = kwargs.get("version", None)
+		self._exit_code = None
+		self.stdin = kwargs.get("stdin")
+		if self.stdin is None:
+			self.stdin = wasm_io()
+		self.stdout = kwargs.get("stdout")
+		if self.stdout is None:
+			self.stdout = wasm_io()
+		self.stderr = kwargs.get("stderr")
+		if self.stderr is None:
+			self.stderr = wasm_io()
+		self._clock = None
+		if parent is None:
+			self._clock = wasi_clock()
+		else:
+			self._clock = parent.clock
+		self._allocator = allocator
+		self._memory = None
+		self._memory_view = None
+		self._components = None
+		self._fds = wasm_fds(self.stdin, self.stdout, self.stderr)
+		self._process = None
+
+	@property
+	def vars(self):
+		return self._vars
+		
+	@property
+	def dirs(self):
+		return self._dirs
+
+	@property
+	def exit_code(self):
+		return self._exit_code
+		
+	@exit_code.setter
+	def exit_code(self, value):
+		self._exit_code = value
+	
+	@property
+	def clock(self):
+		return self._clock
+	
+	@property
+	def components(self):
+		return self._components
+		
+	@property
+	def process(self):
+		return self._process
+		
+	@process.setter
+	def process(self, value):
+		self._process = value
+		
+	def notify(self):
+		self.process.notify()
+	
+	@property
+	def memory(self):
+		self._ensure_memory()
+		return self._memory
+		
+	@memory.setter
+	def memory(self, value):
+		pass
+		
+	@property
+	def memory_view(self):
+		self._ensure_memory_view()
+		return self._memory_view
+	
+	def init_process(self, process):
+		pass
+	
+	def process_raise(self, signal):
+		pass
+	
+	def process_exit(self, exit_code):
+		self.exit_code = exit_code
+		self.cleanup()
+	
+	def preopen(self, dir):
+		pass
+	
+	def get_fd(self, fd):
+		return self._fds.get_fd(fd)
+
+	def get_stream(self, fd):
+		return self._fds.get_stream(fd)
+		
+	def open_fd(self, fd, path, oflags, fs_rights_base, fs_rights_inheriting, fdflags):
+		#
+		return self._new_fd(mount, stream)
+	
+	def renumber_fd(self, from_fd, to_fd):
+		pass
+	
+	def close_fd(self, fd):
+		pass
+		
+	def close_stream(self, fd):
+		pass
+		
+	def cleanup(self):
+		pass
+```
+
+A wasm/wasi component model integration with Python implemented with derived `wasm_component` class instances is also in development towards expanding support to the [WASI snapshot preview 2/3 specifications](https://github.com/WebAssembly/WASI). Support for the [WASIX](https://github.com/wasix-org/wasix-witx) WASI preview 1 superset / extensions is also being considered. 
+
+WASI testsuite tests can be run by downloading compiled .wasm executables from the official WASI testsuite prod/testsuite-base branch [https://github.com/WebAssembly/wasi-testsuite/tree/prod/testsuite-base/tests](https://github.com/WebAssembly/wasi-testsuite/tree/prod/testsuite-base/tests). 
+
+Clone the repository and import it into Pythonista for the slighly modified test runner and runtime adapter harness. 
+Place .wasm executable, corresponding .json artefacts and test folders/files for filesystem tests into `wasi_testsuite/wasm32-wasip1`.
+The runner can then be executed with the `wasi_testsuite.py` script or setting `run_wasi_tests = True` from the `__main__` tests executed by `jscore_runtime.py`.
+
+```python
+if __name__ == '__main__':
+	import console
+	console.clear()
+
+	run_tests = True # run javascript / python tests
+	run_wasi_tests = True # run WASI testsuite test runner on any tests in wasi_testsuite/wasm32-wasip1
+```
 
 ---
 
@@ -509,3 +651,9 @@ Further content with more agent guidance and wrangling to attempt to improve thi
 - Modules and scripts loading may not work correctly for some javascript libraries and they may need manual adjustments to work correctly.
 - ModulesLoaderDelegate is using a private protcol / api as there is no other way to access the functionality otherwise.
 
+## Contribution
+Contributions are very much welcome! 
+Please feel free to raise issues for problems encountered. Including details of what you tried and what happend, expected/actual results, code, stack traces etc, the more detail the better to help with debugging ideally.
+Pull requests for code contributions will be reviewed where time permits and accepted, if of sufficient quality, value, reasoning in scope to the module and the overall goals it aims to accomplish. 
+The goals are ambitious and the code aims to provide and bootstrap underlying support for a fairly wide set of sophisticated mechanisms and functionality into Pythonista 3. 
+So there is lots of room for contibutions small, medium and larger!
