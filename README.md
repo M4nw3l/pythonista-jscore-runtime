@@ -501,7 +501,7 @@ class wasm_process:
 A `wasm_process` instance is intended to be interchangable and be same equivalent to `subprocess` based execution as can be observed in Python WebAssembly framework implementations inteded for desktop which perform execution on the system directly running a self contained runtime command program like [Wasmtime](https://github.com/bytecodealliance/wasmtime) and [Wasmer](https://github.com/wasmerio/wasmer). Except using JavaScriptCore as the WebAssembly interpreter and execution engine. 
 
 Processes contain a reference to their `wasm_module` code and a `wasm_env` instance representing the isolated process environments system state.
-A `wasm_env` provides access to memory, representations of standard streams `stdin`, `stdout` and `stderr`, program arguments, environment variables and the filesystem alongside tracking file descriptors. It used to hold and bridge the process memory and system state between Wasm and Python via WebAssembly system interface implemented as `wasm_component`Python class instances. 
+A `wasm_env` provides access to memory, representations of standard streams `stdin`, `stdout` and `stderr`, program arguments, environment variables and the filesystem alongside tracking file descriptors. It is used to hold and bridge the process memory and system state between Wasm and Python via `wasm_component`Python class instances, which represent interfaces / components provided by the runtime for implementing platform/system specific functionality. In this case as Python with Pythonista as the 'host' / 'target' platform/system. 
 
 Isolated process environments provided by `wasm_env` instances have the following interface.
 
@@ -624,11 +624,22 @@ class wasm_env:
 
 A wasm/wasi component model integration with Python implemented with derived `wasm_component` class instances is also in development towards expanding support to the [WASI snapshot preview 2/3 specifications](https://github.com/WebAssembly/WASI). Support for the [WASIX](https://github.com/wasix-org/wasix-witx) WASI preview 1 superset / extensions is also being considered. 
 
+#### Running WASI Testsuite tests
+
 WASI testsuite tests can be run by downloading compiled .wasm executables from the official WASI testsuite prod/testsuite-base branch [https://github.com/WebAssembly/wasi-testsuite/tree/prod/testsuite-base/tests](https://github.com/WebAssembly/wasi-testsuite/tree/prod/testsuite-base/tests). 
 
-Clone the repository and import it into Pythonista for the slighly modified test runner and runtime adapter harness. 
-Place .wasm executable, corresponding .json artefacts and test folders/files for filesystem tests into `wasi_testsuite/wasm32-wasip1`.
-The runner can then be executed with the `wasi_testsuite.py` script or setting `run_wasi_tests = True` from the `__main__` tests executed by `jscore_runtime.py`.
+Clone this repository and import it into Pythonista by your preferred means. A slighly modified version of the testsuite's tests runner fixing a couple of Pythonista specific issues and runtime adapter harness are provided. 
+
+To run the tests:
+
+- Download .wasm executables, corresponding .json artefacts and test folders/files for filesystem tests onto your device from the offical testsuite repository. 
+- Import and place all of the test artefacts into the folder path`wasi_testsuite/wasm32-wasip1`relative to the repository. 
+- The runner can then be executed in two ways:
+	- Set the`run_wasi_tests = True` flag in the `__main__` tests executed by `jscore_runtime.py`, then run the script.
+		- It is preconfigured to any run tests from artefacts in `wasi_testsuite/wasm32-wasip1.`
+		- This method is recommended for development, as it also has tracing for WASM assembly loading and WASI calls enabled. 
+	- Alternatively WASI tests can be ran the`wasi_testsuite.py` script, which is also preconfigured to run tests from artefacts in the `wasi_testsuite/wasm32-wasip1.`
+		- This method is more a means of providing a 'proof' but is less useful fir development as debugging information is omitted. 
 
 ```python
 if __name__ == '__main__':
@@ -652,8 +663,10 @@ Further content with more agent guidance and wrangling to attempt to improve thi
 - ModulesLoaderDelegate is using a private protcol / api as there is no other way to access the functionality otherwise.
 
 ## Contribution
-Contributions are very much welcome! 
-Please feel free to raise issues for problems encountered. Including details of what you tried and what happend, expected/actual results, code, stack traces etc, the more detail the better to help with debugging ideally.
-Pull requests for code contributions will be reviewed where time permits and accepted, if of sufficient quality, value, reasoning in scope to the module and the overall goals it aims to accomplish. 
-The goals are ambitious and the code aims to provide and bootstrap underlying support for a fairly wide set of sophisticated mechanisms and functionality into Pythonista 3. 
-So there is lots of room for contibutions small, medium and larger!
+Contributions are very much welcome! The goals of this project are ambitious and the code aims to provide and bootstrap underlying support for a fairly sophisticated set of mechanisms and functionalities into Pythonista 3. So there is lots of room for contibutions small, medium and large!
+
+Please feel free to raise issues for problems encountered. Make sure that you include details of what you tried and what happend, your expected/actual results, your code, stack traces etc. The more information the better! Debugging is especially hard without data, and sometimes even with data...
+
+Pull requests for code contributions will be reviewed where time permits and accepted, if they are of sufficient quality, add value and are reasoned within the scope of the module and/or the overall goals it aims to accomplish. Code should be entirely your own work and be both sensibly presented and accurately represented, with also thorough depth where neccessary. 
+
+
