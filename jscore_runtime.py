@@ -14,7 +14,7 @@ from objc_util import (c, object_getClass, class_getName, objc_getProtocol)
 import weakref
 from datetime import (datetime, timezone)
 from pathlib import Path
-import base64, enum, functools, io, json, math, os, re, secrets, shutil, struct, sys, tempfile, time, types
+import base64, enum, functools, io, json, math, os, re, secrets, shutil, stat, struct, sys, tempfile, time, types
 import threading
 import logging
 log = logging.getLogger(__name__)
@@ -3353,10 +3353,15 @@ class wasm_component:
 			except Exception as e:
 				err = wasi_err.fault
 				ex = e
+				is_exception = True
 				if isinstance(e, wasi_error):
 					err = e.err
 					ex = e.ex
-				log.exception(f"Error in wasm_component {component_type}.{func_name}: {err.name}, {err} {ex}")
+					is_exception = e.is_exception
+				if is_exception:
+					log.exception(f"Error in wasm_component {component_type}.{func_name}: {err.name}, {err} {ex}")
+				else:
+					log.debug(f"return wasm_component {component_type}.{func_name}: {err.name}, {err}")
 				return err # we need to return a failure code to wasm if an error or exception is not otherwise handled
 		return _handler
 	
@@ -3460,6 +3465,16 @@ class wasi_error(Exception):
 		self.err = err
 		if self.err is None:
 			self.err = wasi_err.notrecoverable
+		self._is_exception = True
+	
+	@property
+	def is_exception(self):
+		return self._is_exception
+			
+	def as_result(self):
+		self._is_exception = False
+		return self
+		
 
 class wasi_clockid(enum.IntEnum):
 	#;;; The clock measuring real time. Time value zero corresponds with 1970-01-01T00:00:00Z.
@@ -3627,15 +3642,46 @@ class wasi_fdstat:
 		self.fs_rights_inheriting = wasi_fdrights.none
 
 class wasi_filestat:
-	def __init__(self, stats = None):
+	def __init__(self, stats = None, context = None):
 		self.device = 0
 		self.ino = 0
-		self.filetype = wasi_filetype.unknown
+		self.filetype = wasi_filestat.get_filetype(stats, context)
 		self.nlink = 0
 		self.size = 0
 		self.atim = 0
 		self.mtim = 0
 		self.ctim = 0
+		if stats is not None:
+			self.device = stats.st_dev
+			self.ino = stats.st_ino
+			self.nlink = stats.st_nlink
+			self.size = stats.st_size
+			self.atim = stats.st_atime_ns
+			self.mtim = stats.st_mtime_ns
+			self.ctim = stats.st_ctime_ns
+	
+	@classmethod
+	def get_filetype(cls, stats, context = None):
+		if stats is None:
+			return wasi_filetype.unknown
+		mode = stats.st_mode
+		if stat.S_ISREG(mode):
+			return wasi_filetype.regular_file
+		if stat.S_ISDIR(mode):
+			return wasi_filetype.directory
+		if stat.S_ISLNK(mode):
+			return wasi_filetype.symbolic_link
+		if stat.S_ISSOCK(mode):
+			if context is None:
+				return wasi_filetype.unknown # determine socket type another way?
+			if context.type == socket.SOCK_DGRAM:
+				return wasi_filetype.socket_dgram
+			return wasi_filetype.socket_stream
+		if stat.S_ISBLK(mode):
+			return wasi_filetype.block_device
+		if stat.S_ISCHR(mode):
+			return wasi_filetype.character_device
+		return wasi_filetype.unknown
 
 # https://github.com/WebAssembly/WASI/blob/v0.2.11/docs/Preview2.md
 class wasi_io(wasm_component):
@@ -3961,7 +4007,7 @@ class wasi_snapshot_preview1(wasm_component):
 		#		symlink_file.write(old_path) # a symlink is just a file with a path to another file
 		#except Exception as e:
 		#	return wasi_err.badf
-		# simlarly to path_link we need to track a persistent reference in wasms notion of the filesystem to simulate a soft link
+		# simlarly to path_link we may need to track a persistent reference in wasms notion of the filesystem to simulate a soft link
 		# as otherwise we cannot determine this file to be a symlink for fdstat/filestat purposes. 
 		# unless real soft linking is allowed by iOS?
 		return wasi_err.nosys
@@ -4317,7 +4363,11 @@ class wasm_fd:
 				setattr(self.fdstats, k, v)
 				
 	def filestat(self):
-		stats = os.stat(self.real_path)
+		stats = None
+		try:
+			stats = os.stat(self.real_path)
+		except FileNotFoundError:
+			raise wasi_error(wasi_err.noent).as_result()
 		filestat = wasi_filestat(stats)
 		return filestat
 		
@@ -4354,7 +4404,11 @@ class wasm_fd:
 	def path_filestat(self, flags, path):
 		path = Path(path)
 		real_path = self.real_path.joinpath(path)
-		stats = os.stat(real_path)
+		stats = None
+		try:
+			stats = os.stat(real_path)
+		except FileNotFoundError:
+			raise wasi_error(wasi_err.noent).as_result()
 		filestat = wasi_filestat(stats)
 		return filestat
 		
@@ -4402,7 +4456,7 @@ class wasm_fds:
 	def new_fd(self, context, stream, **kwargs):
 		count = len(self._fds)
 		if count >= wasm_fds.MAX_FD:
-			raise wasi_error(wasi_err.nfile)
+			raise wasi_error(wasi_err.nfile).as_result()
 		id = count
 		while id in self._fds:
 			id += 1
