@@ -15,6 +15,7 @@ import weakref
 from datetime import (datetime, timezone)
 from pathlib import Path
 import base64, enum, functools, io, json, math, os, re, secrets, shutil, stat, struct, sys, tempfile, time, types
+import socket
 import threading
 import logging
 log = logging.getLogger(__name__)
