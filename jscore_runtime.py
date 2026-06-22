@@ -1184,7 +1184,7 @@ class jscore:
 		if isinstance(value, javascript_callback):
 			value_ref = value.get_jsvalue_ref(context_ref, parent_ref)
 			return value_ref
-		if isinstance(value, bytes):
+		if isinstance(value, bytes) or isinstance(value, bytearray):
 			count = len(value)
 			ex_ref = c_void_p(None)
 			value_ref = cls.JSObjectMakeTypedArray(context_ref, cls.kJSTypedArrayTypeUint8Array, count, byref(ex_ref))
@@ -1200,7 +1200,7 @@ class jscore:
 			if bytes_ptr is not None:
 				value.getBytes_length_(bytes_ptr, count)
 			return value_ref
-		if isinstance(value, list) or isinstance(value, set):
+		if isinstance(value, list) or isinstance(value, set) or isinstance(value, tuple):
 			ex_ref = c_void_p(None)
 			value_ref = cls.JSObjectMakeArray(context_ref, 0, None, byref(ex_ref))
 			count = len(value)
@@ -1268,7 +1268,7 @@ class jscore:
 		if isinstance(value, javascript_callback):
 			jsvalue = value.get_jsvalue(context, parent)
 			return jsvalue
-		if isinstance(value, bytes):
+		if isinstance(value, bytes) or isinstance(value, bytearray):
 			count = len(value)
 			jsvalue = cls.context_eval(context, f"new Uint8Array({count});")
 			context_ref, value_ref = cls.jsvalue_get_refs(jsvalue)
@@ -1286,7 +1286,7 @@ class jscore:
 			if bytes_ptr is not None:
 				value.getBytes_length_(bytes_ptr, count)
 			return jsvalue
-		if isinstance(value, list) or isinstance(value, set):
+		if isinstance(value, list) or isinstance(value, set) or isinstance(value, tuple):
 			jsvalue = cls.JSValue.valueWithNewArrayInContext_(context)
 			for i in range(len(value)):
 				val = cls.py_to_jsvalue(context, value[i], jsvalue)
