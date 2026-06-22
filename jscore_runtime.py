@@ -15,7 +15,6 @@ import weakref
 from datetime import (datetime, timezone)
 from pathlib import Path
 import base64, enum, functools, io, json, math, os, re, secrets, shutil, stat, struct, sys, tempfile, time, types
-import socket
 import threading
 import logging
 log = logging.getLogger(__name__)
@@ -3652,7 +3651,11 @@ class wasi_filestat:
 		self.atim = 0
 		self.mtim = 0
 		self.ctim = 0
-		if stats is not None:
+		if context is not None and context.id < 3:
+			self.device = context.id
+			self.ino = 0
+			self.filetype = wasi_filetype.character_device
+		elif stats is not None:
 			self.device = stats.st_dev
 			self.ino = stats.st_ino
 			self.nlink = stats.st_nlink
@@ -3673,11 +3676,7 @@ class wasi_filestat:
 		if stat.S_ISLNK(mode):
 			return wasi_filetype.symbolic_link
 		if stat.S_ISSOCK(mode):
-			if context is None:
-				return wasi_filetype.unknown # determine socket type another way?
-			if context.type == socket.SOCK_DGRAM:
-				return wasi_filetype.socket_dgram
-			return wasi_filetype.socket_stream
+			return wasi_filetype.unknown
 		if stat.S_ISBLK(mode):
 			return wasi_filetype.block_device
 		if stat.S_ISCHR(mode):
@@ -4369,7 +4368,7 @@ class wasm_fd:
 			stats = os.stat(self.real_path)
 		except FileNotFoundError:
 			raise wasi_error(wasi_err.noent).as_result()
-		filestat = wasi_filestat(stats)
+		filestat = wasi_filestat(stats, self)
 		return filestat
 		
 	def filestat_set(self, size=None, atim=None, mtim=None, ctim=None, fst_flags=0):
@@ -4410,7 +4409,7 @@ class wasm_fd:
 			stats = os.stat(real_path)
 		except FileNotFoundError:
 			raise wasi_error(wasi_err.noent).as_result()
-		filestat = wasi_filestat(stats)
+		filestat = wasi_filestat(stats, self)
 		return filestat
 		
 	def path_filestat_set(self, flags, path, size=None, atim=None, mtim=None, ctim=None, fst_flags=0):
