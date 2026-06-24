@@ -9,8 +9,7 @@ __version__ = '0.0.1'
 
 from ctypes import *
 from ctypes.util import find_library
-from objc_util import *
-from objc_util import (c, object_getClass, class_getName, objc_getProtocol)
+	
 import weakref
 from datetime import (datetime, timezone)
 from pathlib import Path
@@ -19,34 +18,111 @@ import threading
 import logging
 log = logging.getLogger(__name__)
 
-NSDate = ObjCClass("NSDate")
-NSFileManager = ObjCClass("NSFileManager")
+_objc_modules = []
+try:
+	import objc_util
+	_objc_modules.append("objc_util")
+except ImportError:
+	pass
+try:
+	import rubicon.objc
+	import rubicon.runtime
+	_objc_modules.append("rubicon")
+except ImportError:
+	pass
+	
+_objc_module = None
+#_objc_module = "objc_util"
+#_objc_module = "rubicon"
 
-#objective c helpers
-class objc:
+if _objc_module is None and len(_objc_modules) > 0:
+	_objc_module = _objc_modules[0]
+class _objc_stub:
+	modules = _objc_modules
+	module = _objc_module
+	load_library = None
+	property_value = None
+	create_objc_class = None
+	ns_from_py = None
+if _objc_stub.module == "objc_util":
+	from objc_util import (
+		ObjCClass, 
+		ObjCInstance,
+		ns,
+		create_objc_class
+	)
 	# load_library from rubicon 
 	#https://github.com/beeware/rubicon-objc/blob/1a97f483fdd83f4fc31050ee863535e3ed962944/src/rubicon/objc/runtime.py#L77
-	_lib_path = ["/usr/lib"]
-	_framework_path = ["/System/Library/Frameworks"]
-	@classmethod
-	def load_library(cls, name):
+	def load_library(name, lib_path = ["/usr/lib"], framework_path = ["/System/Library/Frameworks"]):
 		path = find_library(name)
 		if path is not None:
 			return CDLL(path)
-
-		for loc in cls._lib_path:
+		for loc in lib_path:
 			try:
 				return CDLL(os.path.join(loc, "lib" + name + ".dylib"))
 			except OSError:
 				pass
-
-		for loc in cls._framework_path:
+		for loc in framework_path:
 			try:
 				return CDLL(os.path.join(loc, name + ".framework", name))
 			except OSError:
 				pass
 		raise ImportError(f"Library {name} not found")
-	
+
+	_objc_stub.load_library = load_library
+	_objc_stub.property_value = lambda v: v() # objc_util properties are python methods
+	_objc_stub.create_objc_class = create_objc_class
+	_objc_stub.ns_from_py = ns
+
+elif _objc_stub.module == "rubicon":
+	from rubicon.objc import (
+		ObjCClass, 
+		ObjCInstance,
+		ObjCProtocol,
+		ns_from_py
+	)
+	from rubicon.objc.runtime import (
+		load_library
+	)
+	# this replicates objc_util.create_objc_class enough so rubicon can understand our objc_util JSModuleLoaderDelegate protocol hack
+	def create_objc_class_rubicon(class_name, protocols=[], methods = []):
+		attrs = dict(map(lambda m: (m.__name__[len(class_name)+1:].replace("_", ":"),m), methods))
+		protocols = list(map(ObjCProtocol, protocols))
+		objc_class = ObjCClass(class_name, bases=[ NSObject ], attrs={}, protocols=protocols, auto_rename = True)
+		for protocol in protocols:
+			for sel_name, method in dict(attrs).items():
+				s = objc.sel(sel_name)
+				method_desc = objc.protocol_getMethodDescription(protocol, s, False, True)
+				if not method_desc or not method_desc.types:
+					method_desc = objc.protocol_getMethodDescription(protocol, s, True, True)
+				if method_desc and method_desc.types:
+					restype = c_void_p if method.restype is None else method.restype
+					argtypes = [c_void_p, c_void_p] + method.argtypes
+					imp = objc.retain_global(CFUNCTYPE(restype, *argtypes)(method))
+					objc.class_addMethod(objc_class, s, imp, method_desc.types)
+					del attrs[sel_name]
+			return objc_class
+
+	_objc_stub.load_library = load_library
+	_objc_stub.property_value = lambda v: v #rubicon uses @property semantics
+	_objc_stub.create_objc_class = create_objc_class_rubicon
+	_objc_stub.ns_from_py = ns_from_py
+else:
+	raise ImportError("Objective-C bridge required. If you are using Pythonista objc_util is broken, otherwise install rubicon.objc.")
+
+NSObject = ObjCClass("NSObject")
+NSNumber = ObjCClass("NSNumber")
+NSString = ObjCClass("NSString") 
+NSDate = ObjCClass("NSDate")
+NSArray = ObjCClass("NSArray")
+NSData = ObjCClass("NSData")
+NSDictionary = ObjCClass("NSDictionary")
+NSFileManager = ObjCClass("NSFileManager")
+
+#objective c helpers
+class objc:
+	load_library = _objc_stub.load_library
+
 	@staticmethod
 	def const(dll, name, typ = c_void_p):
 		if issubclass(typ, c_void_p):
@@ -59,22 +135,43 @@ class objc:
 		func.argtypes = argtypes
 		return staticmethod(func)
 	
-	objc_allocateProtocol = c_func(c.objc_allocateProtocol, c_void_p, c_char_p)
-	objc_protocol_addMethodDescription = c_func(c.protocol_addMethodDescription, None, c_void_p, c_void_p, c_char_p, c_bool, c_bool)
-	objc_protocol_addProtocol = c_func(c.protocol_addProtocol, None, c_void_p, c_void_p)
-	objc_protocol_addProperty = c_func(c.protocol_addProperty, None, c_void_p, c_char_p, c_void_p, c_uint, c_bool, c_bool)
-	objc_registerProtocol = c_func(c.objc_registerProtocol, None, c_void_p)
+	# important: we get our own utility functions here as rubicon configures some restypes with wrappers
+	libobjc = load_library("objc")
+	
+	object_getClass = c_func(libobjc.object_getClass, c_void_p, c_void_p)
+	class_getName = c_func(libobjc.class_getName, c_char_p, c_void_p)
+	sel_registerName = c_func(libobjc.sel_registerName, c_void_p, c_char_p)
+	
+	objc_getProtocol = c_func(libobjc.objc_getProtocol,c_void_p, c_char_p)
+	objc_allocateProtocol = c_func(libobjc.objc_allocateProtocol, c_void_p, c_char_p)
+	objc_protocol_addMethodDescription = c_func(libobjc.protocol_addMethodDescription, None, c_void_p, c_void_p, c_char_p, c_bool, c_bool)
+	objc_protocol_addProtocol = c_func(libobjc.protocol_addProtocol, None, c_void_p, c_void_p)
+	objc_protocol_addProperty = c_func(libobjc.protocol_addProperty, None, c_void_p, c_char_p, c_void_p, c_uint, c_bool, c_bool)
+	
+	objc_registerProtocol = c_func(libobjc.objc_registerProtocol, None, c_void_p)
 
-	@staticmethod
-	def getProtocol(name):
-		return objc_getProtocol(name.encode("ascii"))
+	class objc_method_description (Structure):
+		_fields_ = [('sel', c_void_p), ('types', c_char_p)]
 	
-	@staticmethod
-	def allocateProtocol(name):
-		return objc.objc_allocateProtocol(name.encode("ascii"))
+	protocol_getMethodDescription = c_func(libobjc.protocol_getMethodDescription, objc_method_description, c_void_p, c_void_p, c_bool, c_bool)
+	class_addMethod = c_func(libobjc.class_addMethod, c_bool, c_void_p, c_void_p, c_void_p, c_char_p)
+
+	@classmethod
+	def sel(cls, sel_name):
+		if isinstance(sel_name, str):
+			sel_name = sel_name.encode('ascii')
+		return cls.sel_registerName(sel_name)
 	
-	@staticmethod
-	def get_type_encoding(typ):
+	@classmethod
+	def getProtocol(cls, name):
+		return cls.objc_getProtocol(name.encode("ascii"))
+	
+	@classmethod
+	def allocateProtocol(cls, name):
+		return cls.objc_allocateProtocol(name.encode("ascii"))
+	
+	@classmethod
+	def get_type_encoding(cls, typ):
 		# https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/ObjCRuntimeGuide/Articles/ocrtTypeEncodings.html
 		# objective-c type encoding from a source type reference string - covers a fair few cases but is incomplete. 
 		# While it also cannot understand some c type definitions properly e.g definitions containing refernces to typedef names
@@ -123,8 +220,8 @@ class objc:
 			enc.append("]")
 		return "".join(enc)
 
-	@staticmethod
-	def protocol_addMethodDescription(protocol, method, required, types = None, instance = None):
+	@classmethod
+	def protocol_addMethodDescription(cls, protocol, method, required, types = None, instance = None):
 		# add a protocol method description from its objective-c definition
 		method = method.strip()
 		name = "".join(re.findall("([A-z0-9]+:)", method))
@@ -142,13 +239,13 @@ class objc:
 			types = re.findall("\\(([A-z0-9 \*_\[\]]+)\\)", method)
 			description = []
 			for typ in types:
-				enc = objc.get_type_encoding(typ)
+				enc = cls.get_type_encoding(typ)
 				description.append(enc)
 			description = "".join(description)
 		#print(name)
-		selector = sel(name)
+		selector = cls.sel(name)
 		description = description.encode("ascii")
-		objc.objc_protocol_addMethodDescription(protocol, selector, description, required, instance)
+		cls.objc_protocol_addMethodDescription(protocol, selector, description, required, instance)
 		
 	@staticmethod
 	def protocol_addProperty(protocol, property, required, types = None, instance = None):
@@ -160,30 +257,30 @@ class objc:
 		#objc.objc_protocol_addProperty(protocol, name, attribs, attribs_count, required, instance)
 		raise NotImplementedError()
 
-	@staticmethod
-	def protocol_addProtocol(protocol, parent):
-		objc.objc_protocol_addProtocol(protocol, parent)
+	@classmethod
+	def protocol_addProtocol(cls, protocol, parent):
+		cls.objc_protocol_addProtocol(protocol, parent)
 	
-	@staticmethod
+	@classmethod
 	# create a protocol from an objc definition
-	def protocol(name, body = [], types = [], protocols=["NSObject"], debug = True):
+	def protocol(cls, name, body = [], types = [], protocols=["NSObject"], debug = True):
 		basename = name
-		p = objc.getProtocol(name)
+		p = cls.getProtocol(name)
 		if p is not None and not debug:
 			return name
 		counter = 0
 		while debug:
-			p = objc.getProtocol(name)
+			p = cls.getProtocol(name)
 			if p is None:
 				break
 			name = f"{basename}_{counter}"
 			counter = counter + 1
-		p = objc.allocateProtocol(name)
+		p = cls.allocateProtocol(name)
 		for id in protocols:
-			parent = objc.getProtocol(id)
+			parent = cls.getProtocol(id)
 			if parent is None:
 				 raise ValueError(f"Protocol not found '{id}'")
-			objc.protocol_addProtocol(p, parent)
+			cls.protocol_addProtocol(p, parent)
 		required = True
 		typesLen = len(types)
 		for i in range(len(body)):
@@ -202,72 +299,76 @@ class objc:
 			elif method == "@optional":
 				required = False
 			elif ":" not in method or method.startswith("@property"):
-				objc.protocol_addProperty(p, method, required, methodTypes)
+				cls.protocol_addProperty(p, method, required, methodTypes)
 			else:
-				objc.protocol_addMethodDescription(p, method, required, methodTypes)
-		objc.objc_registerProtocol(p)
+				cls.protocol_addMethodDescription(p, method, required, methodTypes)
+		cls.objc_registerProtocol(p)
 		#print(name)
 		return name
 		
-	new_class = create_objc_class
+	@classmethod
+	def new_class(cls, name, protocols=[], methods = []):
+		return _objc_stub.create_objc_class(name, protocols=protocols, methods=methods)
 
-	@staticmethod
-	def ns_class(nsobject):
+	@classmethod
+	def ns_class(cls, nsobject):
 		if not (isinstance(nsobject, c_void_p) or isinstance(nsobject, ObjCInstance)):
 			return None
-		objClass = ObjCInstance(object_getClass(nsobject))
-		objClassName = class_getName(objClass)
+		objClass = ObjCInstance(cls.object_getClass(nsobject))
+		objClassName = cls.class_getName(objClass)
 		return objClass
 
-	@staticmethod
-	def ns_subclass_of(nsobject, objcClass, objClass=None):
+	@classmethod
+	def ns_subclass_of(cls, nsobject, objcClass, objClass=None):
 		if not (isinstance(nsobject, c_void_p) or isinstance(nsobject, ObjCInstance)):
 			return False
 		if objClass is None:
-			objClass = objc.ns_class(nsobject)
+			objClass = cls.ns_class(nsobject)
 		if objClass is None:
 			return False
 		return objClass.isSubclassOfClass_(objcClass)
 
-	@staticmethod
-	def ns_to_py(nsobject, objClass=None):
+	@classmethod
+	def ns_to_py(cls, nsobject, objClass=None):
 		if objClass is None:
-			objClass = objc.ns_class(nsobject)
-		if objc.ns_subclass_of(nsobject, NSString, objClass):
+			objClass = cls.ns_class(nsobject)
+		if cls.ns_subclass_of(nsobject, NSString, objClass):
 			v = str(nsobject)
 			return v
-		if objc.ns_subclass_of(nsobject, NSNumber, objClass):
+		if cls.ns_subclass_of(nsobject, NSNumber, objClass):
 			nsnumber = nsobject
-			doubleValue = float(nsnumber.doubleValue())
-			intValue = int(nsnumber.longLongValue())
+			doubleValue = float(cls.property_value(nsnumber.doubleValue))
+			intValue = int(cls.property_value(nsnumber.longLongValue))
 			if doubleValue == intValue:
 				return intValue
 			return doubleValue
-		if objc.ns_subclass_of(nsobject, NSDate, objClass):
+		if cls.ns_subclass_of(nsobject, NSDate, objClass):
 			nsdate = nsobject
 			timestamp = nsdate.timeIntervalSince1970()
 			return datetime.fromtimestamp(timestamp, timezone.utc)
-		if objc.ns_subclass_of(nsobject, NSArray, objClass):
+		if cls.ns_subclass_of(nsobject, NSArray, objClass):
 			nsarray = nsobject
 			items = []
 			for i in range(nsarray.count()):
 				item = objc.ns_to_py(nsarray.objectAtIndex_(i))
 				items.append(item)
 			return items
-		if objc.ns_subclass_of(nsobject, NSDictionary, objClass):
+		if cls.ns_subclass_of(nsobject, NSDictionary, objClass):
 			nsdict = nsobject
 			keys = nsdict.allKeys()
 			values = nsdict.allValues()
 			items = {}
 			for i in range(nsdict.count()):
-				key = objc.ns_to_py(keys.objectAtIndex_(i))
-				value = objc.ns_to_py(values.objectAtIndex_(i))
+				key = cls.ns_to_py(keys.objectAtIndex_(i))
+				value = cls.ns_to_py(values.objectAtIndex_(i))
 				items[key] = value
 			return items
 		className = "unknown"
 		if objClass is not None:
-			className = class_getName(objClass)
+			className = cls.class_getName(objClass)
 		raise NotImplementedError("Unhandled NSObject type {objClass} ({className}) for {nsobject}.")
+	
+	ns = _objc_stub.ns_from_py
 	
 	@staticmethod
 	def c_array(count, items = None, typ = c_byte, ptr = c_void_p):
@@ -314,10 +415,10 @@ class objc:
 	def c_array_p(count, items = None, typ = c_void_p, ptr = c_void_p):
 		return objc.c_array(count, items, typ, ptr)
 	
-	@staticmethod
-	def nsdata_from_file(path, fileManager = None):
+	@classmethod
+	def nsdata_from_file(cls, path, fileManager = None):
 		if fileManager is None:
-			fileManager = NSFileManager.defaultManager()
+			fileManager = cls.property_value(NSFileManager.defaultManager)
 		path = Path(str(path))
 		if not path.is_absolute():
 			path = path.cwd().joinpath(path)
@@ -345,23 +446,38 @@ class objc:
 			limit = cls._ctype_limit(c_int_type, *limits)
 			cls._ctype_limits[c_int_type] = limit
 		return limit
+	
+	property_value = _objc_stub.property_value
+	_retained_globals = []
+	@classmethod
+	def retain_global(cls, value):
+		cls._retained_globals.append(value)
+		return value
+		
+	@classmethod
+	def release_global(cls, value):
+		try:
+			cls._retained_globals.remove(value)
+		except ValueError:
+			pass
+		return value
 
 #JavaScriptCore api
 class jscore:
 	version = __version__
+	# c api
+	lib = objc.load_library("JavaScriptCore")
+	
 	JSVirtualMachine = ObjCClass("JSVirtualMachine")
 	JSContext = ObjCClass("JSContext")
 	JSValue = ObjCClass("JSValue")
 	JSManagedValue = ObjCClass("JSManagedValue")
 	JSScript = ObjCClass("JSScript")
-	JSExport = ObjCClass("JSExport")
+	#JSExport = ObjCClass("JSExport")
 	JSObjCClassInfo = ObjCClass("JSObjCClassInfo")
 	JSWrapperMap = ObjCClass("JSWrapperMap")
 	JSVMWrapperCache = ObjCClass("JSVMWrapperCache")
 	WTFWebFileManagerDelegate = ObjCClass("WTFWebFileManagerDelegate")
-	
-	# c api
-	lib = objc.load_library("JavaScriptCore")
 	
 	JSContextGetGroup = objc.c_func(lib.JSContextGetGroup, c_void_p, c_void_p)
 	JSContextGroupCreate = objc.c_func(lib.JSContextGroupCreate, c_void_p)
@@ -543,6 +659,7 @@ class jscore:
 	f = JSCoreModuleLoaderDelegate_context_fetchModuleForIdentifier_withResolveHandler_andRejectHandler_
 	f.argtypes = [c_void_p,c_void_p,c_void_p,c_void_p]
 	f.encoding = "@:@@@@@"
+	f.restype = None
 	
 	# forward to loader when defined (though does not appear to be called)
 	def JSCoreModuleLoaderDelegate_willEvaluateModule_(_self,_cmd,_url):
@@ -554,6 +671,7 @@ class jscore:
 	f = JSCoreModuleLoaderDelegate_willEvaluateModule_
 	f.argtypes = [c_void_p]
 	f.encoding = "@:@@"
+	f.restype = None
 	
 	# forward to loader when defined (though does not appear to be called)
 	def JSCoreModuleLoaderDelegate_didEvaluateModule_(_self,_cmd,_url):
@@ -565,6 +683,7 @@ class jscore:
 	f = JSCoreModuleLoaderDelegate_didEvaluateModule_
 	f.argtypes = [c_void_p]
 	f.encoding = "@:@@"
+	f.restype = None
 	
 	# JSModuleLoaderDelegate protocol implementation
 	JSCoreModuleLoaderDelegate = objc.new_class("JSCoreModuleLoaderDelegate", protocols=[JSModuleLoaderDelegate], methods = [
@@ -684,12 +803,12 @@ class jscore:
 	@classmethod
 	def vm_allocate(cls):
 		vm = jscore.JSVirtualMachine.alloc().init()
-		retain_global(vm)
+		objc.retain_global(vm)
 		return vm
 	
 	@classmethod
 	def vm_deallocate(cls, vm):
-		release_global(vm)
+		objc.release_global(vm)
 	
 	@classmethod
 	def runtime_deallocate(cls, runtime, vm_owner):
@@ -705,7 +824,7 @@ class jscore:
 					if isinstance(script, jsscript_ref):
 						script.release()
 					else:
-						release_global(script)
+						objc.release_global(script)
 					released.append(script)
 		if vm_owner:
 			cleanup()
@@ -727,9 +846,9 @@ class jscore:
 	@classmethod
 	def context_allocate(cls, vm):
 		context = jscore.JSContext.alloc().initWithVirtualMachine_(vm)
-		retain_global(context)
+		objc.retain_global(context)
 		context.setInspectable(True)
-		context_ref = context.JSGlobalContextRef()
+		context_ref = cast(context.JSGlobalContextRef(), c_void_p)
 		metadata = cls._context_metadata(context, context_ref, dict(cls._prototype_lookup))
 		cls._context_lookup[context] = metadata
 		cls._context_lookup[context_ref.value] = metadata
@@ -737,11 +856,11 @@ class jscore:
 	
 	@classmethod
 	def context_deallocate(cls, context):
-		context_ref = context.JSGlobalContextRef()
+		context_ref = cast(context.JSGlobalContextRef(),c_void_p)
 		metadata = cls._context_lookup[context]
 		del cls._context_lookup[context]
 		del cls._context_lookup[context_ref.value]
-		release_global(context)
+		objc.release_global(context)
 
 	@classmethod
 	def context_eval(cls, context, script, sourceUrl = None):
@@ -751,7 +870,7 @@ class jscore:
 		else:
 			result = context.evaluateScript_withSourceUrl_(script, sourceUrl)
 		result = ObjCInstance(result)
-		ex = context.exception()
+		ex = objc.property_value(context.exception)
 		if ex is not None:
 			context.setException(None) # clear exception if set
 		return result, ex
@@ -802,8 +921,8 @@ class jscore:
 			self.ctors = {}
 			self.prototypes_metadata = {}
 			for key,prototype in js_prototypes.jsobject:
-				_ctor = (~prototype._ctor_).JSValueRef()
-				_prototype = (~prototype._prototype_).JSValueRef()
+				_ctor = cast((~prototype._ctor_).JSValueRef(), c_void_p)
+				_prototype = cast((~prototype._prototype_).JSValueRef(), c_void_p)
 				self.ctors[_prototype.value] = _ctor
 				self.prototypes[_ctor.value] = prototype
 				self.prototypes[_prototype.value] = prototype
@@ -823,6 +942,10 @@ class jscore:
 		
 		@classmethod
 		def get(cls, id):
+			try:
+				id = cast(id, c_void_p)
+			except:
+				pass
 			if isinstance(id, c_void_p):
 				return cls._context_lookup[id.value]
 			return cls._context_lookup[id]
@@ -886,7 +1009,7 @@ class jscore:
 	
 	@classmethod
 	def jsvalue_get_refs(cls, value):
-		context_ref = value.context().JSGlobalContextRef()
+		context_ref = objc.property_value(value.context).JSGlobalContextRef()
 		value_ref = value.JSValueRef()
 		return context_ref, value_ref
 	
@@ -901,15 +1024,15 @@ class jscore:
 		ex_ref = c_void_p(None)
 		cls.JSObjectSetPropertyAtIndex(context_ref, metadata.jsvalueref_to_jsvalue_object_ref, index, value_ref, byref(ex_ref))
 		jsvalue = metadata.jsvalueref_to_jsvalue_object.valueAtIndex(index)
-		metadata.jsvalueref_to_jsvalue_object.setValue_atIndex_(index, metadata.undefined_jsvalue)
+		metadata.jsvalueref_to_jsvalue_object.setValue_atIndex_(metadata.undefined_jsvalue, index)
 		return jsvalue
 	
 	@classmethod
 	def jsvalueref_get_prototype_from_metadata(cls, context_ref, value_ref, prototype_ref = None):
 		if prototype_ref is None:
 			prototype_ref = cls.JSObjectGetPrototype(context_ref, value_ref)
-		metadata = cls._context_metadata.get(context_ref)
-		metadata_prototype = metadata.prototypes.get(prototype_ref)	
+		metadata = cls._context_metadata.get(cast(context_ref, c_void_p).value)
+		metadata_prototype = metadata.prototypes.get(cast(prototype_ref,c_void_p).value)	
 		if metadata_prototype is not None:
 			return metadata_prototype
 		for key,p in dict(metadata.classes).items():
@@ -943,7 +1066,7 @@ class jscore:
 		keys = []
 		if not is_typed_array:
 			keys = cls.jsobjectref_keys(context_ref, value_ref)
-			if value.isArray():
+			if objc.property_value(value.isArray):
 				count = len(keys)
 				items = []
 				for i in range(count):
@@ -977,19 +1100,19 @@ class jscore:
 		if not objc.ns_subclass_of(value, cls.JSValue):
 			raise Exception("Value must be JSValue")
 		
-		if value.isUndefined():
+		if objc.property_value(value.isUndefined):
 			return javascript_value.undefined
 		
-		if value.isNull():
+		if objc.property_value(value.isNull):
 			return None
 			
-		if value.isBoolean():
+		if objc.property_value(value.isBoolean):
 			return value.toBool()
 
-		if value.isNumber() or value.isString() or value.isDate():
+		if objc.property_value(value.isNumber) or objc.property_value(value.isString) or objc.property_value(value.isDate):
 			return objc.ns_to_py(value.toObject())
 		
-		if value.isSymbol():
+		if objc.property_value(value.isSymbol):
 			return javascript_symbol(value)
 		
 		context_ref, value_ref = cls.jsvalue_get_refs(value)
@@ -1000,7 +1123,7 @@ class jscore:
 
 	@classmethod
 	def jsvalue_is_object(cls, value, context_ref = None, value_ref = None):
-		if javascript_value.is_undefined(value) or not value.isObject():
+		if javascript_value.is_undefined(value) or not objc.property_value(value.isObject):
 			return False
 		if value_ref is None:
 			context_ref, value_ref = cls.jsvalue_get_refs(value)
@@ -1036,7 +1159,7 @@ class jscore:
 	
 	@classmethod
 	def jsobject_get_keys(cls, value, context_ref = None, value_ref = None):
-		if javascript_value.is_undefined(value) or not value.isObject():
+		if javascript_value.is_undefined(value) or not objc.property_value(value.isObject):
 			return []
 		if value_ref is None:
 			context_ref, value_ref = cls.jsvalue_get_refs(value)
@@ -1243,7 +1366,7 @@ class jscore:
 		if isinstance(value, bool):
 			return cls.JSValue.valueWithBool_inContext_(value, context)
 		if isinstance(value, int) or isinstance(value, float) or isinstance(value, str):
-			return cls.JSValue.valueWithObject_inContext_(ns(value), context)
+			return cls.JSValue.valueWithObject_inContext_(objc.ns(value), context)
 		if isinstance(value, datetime):
 			timestamp = value.timestamp()
 			return cls.JSValue.valueWithObject_inContext_(cls.initWithTimeIntervalSince1970_(timestamp), context)
@@ -1692,7 +1815,7 @@ class javascript_bigint_f(javascript_bigint.mixin(float)):
 class javascript_bigint_s(javascript_bigint.mixin(str)):
 	def to_jsvalue(self, context):
 		value = self.py_value
-		return jscore.JSValue.valueWithNewBigIntFromString_inContext_(ns(value), context)
+		return jscore.JSValue.valueWithNewBigIntFromString_inContext_(objc.ns(value), context)
 		
 	def to_jsvalueref(self, context_ref):
 		value = self.py_value
@@ -1969,20 +2092,20 @@ class javascript_function:
 	def ns_args(self, context, args):
 		args = list(args)
 		args = self.ns_arg(context, args)
-		nsargs = ns(args)
+		nsargs = objc.ns(args)
 		return nsargs
 
 	def call(self, *args, this = None):
 		if this is None and self.parent_ref is not None:
 			this = self.parent_ref
 		if self.jsvalue is not None and this is None:
-			context = self.jsvalue.context()
+			context = objc.property_value(self.jsvalue.context)
 			nsargs = self.ns_args(context, args)
-			self.jsvalue.context().setException_(None)
+			context.setException_(None)
 			value = self.jsvalue.callWithArguments_(nsargs)
-			exception = self.jsvalue.context().exception()
+			exception = objc.property_value(context.exception)
 			if exception is not None:
-				self.jsvalue.context().setException_(None)
+				context.setException_(None)
 				raise Exception(str(exception))
 			return javascript_value(value)
 		if self.jsvalue is not None and self.context_ref is None and self.value_ref is None:
@@ -1999,6 +2122,10 @@ class javascript_function:
 			if count > 0:
 				args_ref = objc.c_array_p(count, lambda i: jscore.py_to_jsvalueref(self.context_ref, args[i]))
 			this_ref = None
+			try:
+				this = cast(this,c_void_p)
+			except:
+				pass
 			if isinstance(this, c_void_p):
 				this_ref = this
 			elif objc.ns_subclass_of(this, jscore.JSValue):
@@ -2266,7 +2393,7 @@ class jsscript_ref:
 	def __init__(self, runtime, url, source):
 		self.runtime = runtime
 		self.vm = runtime.vm
-		self.context_group_ref = self.vm.JSContextGroupRef()
+		self.context_group_ref = objc.property_value(self.vm.JSContextGroupRef)
 		self.url = url
 		self.source = source
 		self.url_ref = jscore.str_to_jsstringref(url)
@@ -2294,7 +2421,7 @@ class jsscript_ref:
 			line = self.error_line
 			exception = jscore.jsvalueref_to_py(context_ref, self.error_ref)
 			raise ImportError(f"Error importing script at {line}, {exception}")
-		this_ref = context.globalObject()
+		this_ref = objc.property_value(context.globalObject)
 		this_ref = this_ref.JSValueRef()
 		exception_ref = c_void_p(None)
 		value_ref = jscore.JSScriptEvaluate(context_ref, self.script_ref, this_ref, byref(exception_ref))
@@ -2313,8 +2440,9 @@ class jscore_module_loader:
 		self.context = context.context
 		self.scripts = {}
 		self.modules = {}
-		self.delegate = jscore.JSCoreModuleLoaderDelegate.alloc().init().autorelease()
-		retain_global(self.delegate)
+		self.delegate = None
+		self.delegate = jscore.JSCoreModuleLoaderDelegate.alloc().init()
+		objc.retain_global(self.delegate)
 		self.delegate._pyinstance = weakref.ref(self)
 		self.context.setModuleLoaderDelegate_(self.delegate)
 		self.resolved = []
@@ -2324,7 +2452,7 @@ class jscore_module_loader:
 		
 	def release(self):
 		self.context.setModuleLoaderDelegate_(None)
-		release_global(self.delegate)
+		objc.release_global(self.delegate)
 		self.delegate = None
 		
 	def fetch_module(self, module, resolve, reject):
@@ -2617,7 +2745,7 @@ class jscore_runtime:
 		error = c_void_p(None)
 		#bytecodeCache requires a data vault if specified, so we don't...
 		script = loader(scriptType, context, sourceUrl, None, self.vm, byref(error))
-		retain_global(script) # DO NOT release JSScripts this will cause a crash while vm is alive
+		objc.retain_global(script) # DO NOT release JSScripts this will cause a crash while vm is alive
 		if error:
 			error = ObjCInstance(error)
 		else:
@@ -2844,7 +2972,7 @@ class jsobject_accessor:
 class javascript_context_accessor:
 	def __init__(self, context):
 		self.___context___ = context
-		self.___globalObject___ = context.context.globalObject()
+		self.___globalObject___ = objc.property_value(context.context.globalObject)
 		self.___evaluator___ = jsvalue_evaluator(context, self.___globalObject___)
 		self.___init___ = True
 		
@@ -3025,12 +3153,12 @@ class wasm_module:
 		if self.module is not None:
 			return self.instance
 		if self.nsdata is None and self.data is not None:
-			self.nsdata = ns(self.bytes)
+			self.nsdata = objc.ns(self.bytes)
 			self.data = None
 		if self.nsdata is None:
 			raise ImportError("Assembly data not loaded.")
 		self.context = context
-		bytes_len = self.nsdata.length()
+		bytes_len = objc.property_value(self.nsdata.length)
 		# Work around for MakeTypedArray returning NaN floats when wrapped in a JSValue
 		self.jsdata = self.context.eval(f"new Uint8Array({bytes_len});").jsvalue 
 		context_ref, value_ref = jscore.jsvalue_get_refs(self.jsdata)
