@@ -15,7 +15,8 @@ Aiming also to be compatible with WebAssembly in Python 3 ongoing through backpo
 - Extensive bi-directional type marshalling and conversion supporting primitives, functions, typed arrays, lists, dicts and complex objects.
 - Performant, efficient and accurate with values handled in round-tripable formats, and using direct low level memory access where applicable.
 - Comprehensive mapping of Apple's [JavascriptCore Objective-C API](https://developer.apple.com/documentation/javascriptcore?language=objc).
-- Zero dependencies, implented as a single file Python module, using just `objc-util` and the python standard library. 
+- Zero external dependencies in Pythonista, implented as a single file Python module, using just `objc-util` and the python standard library. 
+- Cross-compatible with `rubicon.objc` by [BeeWare](https://github.com/beeware/rubicon-objc) so should also be supported any iOS environment with Python 3.10 or above.
 
 ## Features - Unstable
 - WebAssembly System Interface at [(WASI) snapshot preview 1](https://github.com/WebAssembly/WASI/tree/wasi-0.1) now has partial support and passes a number of the official [WebAssembly/wasi-testsuite](https://github.com/WebAssembly/wasi-testsuite) tests. 
