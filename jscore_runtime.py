@@ -3760,7 +3760,7 @@ class wasi_filestat:
 	def __init__(self, stats = None, context = None):
 		self.device = 0
 		self.ino = 0
-		self.filetype = wasi_filestat.get_filetype(stats, context)
+		self.filetype = self.get_filetype(stats, context)
 		self.nlink = 0
 		self.size = 0
 		self.atim = 0
@@ -3778,6 +3778,11 @@ class wasi_filestat:
 			self.atim = stats.st_atime_ns
 			self.mtim = stats.st_mtime_ns
 			self.ctim = stats.st_ctime_ns
+
+	def to_bytes(self):
+		data = struct.pack("<QQBQ", self.device, self.ino, self.filetype, self.nlink)
+		data += struct.pack("<QQQQ", self.size, self.atim, self.mtim, self.ctim)
+		return data
 
 	@classmethod
 	def get_filetype(cls, stats, context = None):
@@ -3884,10 +3889,7 @@ class wasi_snapshot_preview1(wasm_component):
 
 	def fd_filestat_get(self, fd, buffer):
 		fd = self.env.get_fd(fd)
-		filestat = fd.filestat()
-		# sizes need checking
-		data = struct.pack("<IIII", filestat.device, filestat.ino, filestat.filetype, filestat.nlink)
-		data += struct.pack("<QQQQ", filestat.size, filestat.atim, filestat.mtim, filestat.ctim)
+		data = fd.filestat().to_bytes()
 		self.memory_view.setBytes(buffer, data)
 
 	def fd_filestat_set_size(self, fd, size):
@@ -4027,10 +4029,7 @@ class wasi_snapshot_preview1(wasm_component):
 	def path_filestat_get(self, fd, flags, path_ptr, path_size, buffer):
 		fd = self.env.get_fd(fd)
 		path = self.memory_view.getString(path_ptr, path_size)
-		filestat = fd.path_filestat(flags, path)
-		# sizes need checking
-		data = struct.pack("<IIII", filestat.device, filestat.ino, filestat.filetype, filestat.nlink)
-		data += struct.pack("<QQQQ", filestat.size, filestat.atim, filestat.mtim, filestat.ctim)
+		data = fd.path_filestat(flags, path).to_bytes()
 		self.memory_view.setBytes(buffer, data)
 
 	def path_filestat_set_times(self, fd, flags, path_ptr, path_size, atim, mtim, fst_flags):
@@ -4165,15 +4164,19 @@ class wasi_snapshot_preview1(wasm_component):
 		self.memory_view.setBytes(buf, data, buf_len)
 
 	def sock_accept(self, fd, flags):
+		fd = self.env.get_socket(fd)
 		return wasi_err.notcapable
 
 	def sock_recv(self, fd, ri_data, ri_flags):
+		fd = self.env.get_socket(fd)
 		return wasi_err.notcapable
 
 	def sock_send(self, fd, si_data, si_flags):
+		fd = self.env.get_socket(fd)
 		return wasi_err.notcapable
 
 	def sock_shutdown(self, fd, how):
+		fd = self.env.get_socket(fd)
 		return wasi_err.notcapable
 
 class wasm_wasi:
@@ -4503,6 +4506,10 @@ class wasm_fd:
 	def is_dir(self):
 		return self.real_path.is_dir()
 
+	@property
+	def is_socket(self):
+		return False
+
 	def read_dir(self, cookie):
 		if not self.is_dir:
 			raise wasi_error(wasi_err.notdir)
@@ -4607,6 +4614,15 @@ class wasm_fds:
 		if stream is None:
 			raise wasi_error(wasi_err.badf)
 		return stream
+
+	def get_socket(self, id):
+		id = self.get_id(id)
+		fd = self._fds.get(id)
+		if fd is None:
+			raise wasi_error(wasi_err.badf)
+		if not fd.is_socket:
+			raise wasi_error(wasi_err.notsock).as_result()
+		return fd
 
 	def renumber_fd(self, from_id, to_id):
 		fid = self.get_id(from_id)
@@ -4779,6 +4795,9 @@ class wasm_env:
 
 	def get_stream(self, fd):
 		return self._fds.get_stream(fd)
+
+	def get_socket(self, fd):
+		return self._fds.get_socket(fd)
 
 	def open_fd(self, fd, path, oflags, fs_rights_base, fs_rights_inheriting, fdflags):
 		fd = self.get_fd(fd)
@@ -5059,6 +5078,8 @@ if __name__ == '__main__':
 	run_wasi_tests = False
 	log.setLevel(logging.DEBUG)
 	logging.basicConfig(level = logging.DEBUG)
+	
+	ts = time.time()
 	
 	def header(text, end_only = False):
 		if not end_only:
@@ -5420,4 +5441,4 @@ if __name__ == '__main__':
 			#test_suite_path + "3", 
 			"-r", test_adapter_path
 		)
-
+	print(time.time()-ts)
