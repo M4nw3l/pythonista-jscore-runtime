@@ -9,7 +9,7 @@ __version__ = '0.0.1'
 
 from ctypes import *
 from ctypes.util import find_library
-	
+
 import weakref
 from datetime import (datetime, timezone)
 from pathlib import Path
@@ -30,7 +30,7 @@ try:
 	_objc_modules.append("rubicon")
 except ImportError:
 	pass
-	
+
 _objc_module = None
 #_objc_module = "objc_util"
 #_objc_module = "rubicon"
@@ -128,31 +128,31 @@ class objc:
 		if issubclass(typ, c_void_p):
 			return ObjCInstance(typ.in_dll(dll, name))
 		return typ.in_dll(dll, name)
-	
+
 	@staticmethod
 	def c_func(func, restype, *argtypes):
 		func.restype = restype
 		func.argtypes = argtypes
 		return staticmethod(func)
-	
+
 	# important: we get our own utility functions here as rubicon configures some restypes with wrappers
 	libobjc = load_library("objc")
-	
+
 	object_getClass = c_func(libobjc.object_getClass, c_void_p, c_void_p)
 	class_getName = c_func(libobjc.class_getName, c_char_p, c_void_p)
 	sel_registerName = c_func(libobjc.sel_registerName, c_void_p, c_char_p)
-	
+
 	objc_getProtocol = c_func(libobjc.objc_getProtocol,c_void_p, c_char_p)
 	objc_allocateProtocol = c_func(libobjc.objc_allocateProtocol, c_void_p, c_char_p)
 	objc_protocol_addMethodDescription = c_func(libobjc.protocol_addMethodDescription, None, c_void_p, c_void_p, c_char_p, c_bool, c_bool)
 	objc_protocol_addProtocol = c_func(libobjc.protocol_addProtocol, None, c_void_p, c_void_p)
 	objc_protocol_addProperty = c_func(libobjc.protocol_addProperty, None, c_void_p, c_char_p, c_void_p, c_uint, c_bool, c_bool)
-	
+
 	objc_registerProtocol = c_func(libobjc.objc_registerProtocol, None, c_void_p)
 
 	class objc_method_description (Structure):
 		_fields_ = [('sel', c_void_p), ('types', c_char_p)]
-	
+
 	protocol_getMethodDescription = c_func(libobjc.protocol_getMethodDescription, objc_method_description, c_void_p, c_void_p, c_bool, c_bool)
 	class_addMethod = c_func(libobjc.class_addMethod, c_bool, c_void_p, c_void_p, c_void_p, c_char_p)
 
@@ -161,15 +161,15 @@ class objc:
 		if isinstance(sel_name, str):
 			sel_name = sel_name.encode('ascii')
 		return cls.sel_registerName(sel_name)
-	
+
 	@classmethod
 	def getProtocol(cls, name):
 		return cls.objc_getProtocol(name.encode("ascii"))
-	
+
 	@classmethod
 	def allocateProtocol(cls, name):
 		return cls.objc_allocateProtocol(name.encode("ascii"))
-	
+
 	@classmethod
 	def get_type_encoding(cls, typ):
 		# https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/ObjCRuntimeGuide/Articles/ocrtTypeEncodings.html
@@ -246,7 +246,7 @@ class objc:
 		selector = cls.sel(name)
 		description = description.encode("ascii")
 		cls.objc_protocol_addMethodDescription(protocol, selector, description, required, instance)
-		
+
 	@staticmethod
 	def protocol_addProperty(protocol, property, required, types = None, instance = None):
 		#property = property.strip()
@@ -260,7 +260,7 @@ class objc:
 	@classmethod
 	def protocol_addProtocol(cls, protocol, parent):
 		cls.objc_protocol_addProtocol(protocol, parent)
-	
+
 	@classmethod
 	# create a protocol from an objc definition
 	def protocol(cls, name, body = [], types = [], protocols=["NSObject"], debug = True):
@@ -303,9 +303,8 @@ class objc:
 			else:
 				cls.protocol_addMethodDescription(p, method, required, methodTypes)
 		cls.objc_registerProtocol(p)
-		#print(name)
 		return name
-		
+
 	@classmethod
 	def new_class(cls, name, protocols=[], methods = []):
 		return _objc_stub.create_objc_class(name, protocols=protocols, methods=methods)
@@ -367,9 +366,9 @@ class objc:
 		if objClass is not None:
 			className = cls.class_getName(objClass)
 		raise NotImplementedError("Unhandled NSObject type {objClass} ({className}) for {nsobject}.")
-	
+
 	ns = _objc_stub.ns_from_py
-	
+
 	@staticmethod
 	def c_array(count, items = None, typ = c_byte, ptr = c_void_p):
 		if items is None:
@@ -410,11 +409,11 @@ class objc:
 		if ptr is None:
 			return array
 		return cast(array, ptr)
-	
+
 	@staticmethod
 	def c_array_p(count, items = None, typ = c_void_p, ptr = c_void_p):
 		return objc.c_array(count, items, typ, ptr)
-	
+
 	@classmethod
 	def nsdata_from_file(cls, path, fileManager = None):
 		if fileManager is None:
@@ -427,13 +426,13 @@ class objc:
 		path = str(path)
 		data = fileManager.contentsAtPath_(path)
 		return data
-	
+
 	class _ctype_limit:
 		def __init__(self, ctype, min, max):
 			self.ctype = ctype
 			self.min = min
 			self.max = max
-	
+
 	_ctype_limits = {}
 	@classmethod
 	def c_int_limit(cls, c_int_type):
@@ -446,14 +445,14 @@ class objc:
 			limit = cls._ctype_limit(c_int_type, *limits)
 			cls._ctype_limits[c_int_type] = limit
 		return limit
-	
+
 	property_value = _objc_stub.property_value
 	_retained_globals = []
 	@classmethod
 	def retain_global(cls, value):
 		cls._retained_globals.append(value)
 		return value
-		
+
 	@classmethod
 	def release_global(cls, value):
 		try:
@@ -467,7 +466,7 @@ class jscore:
 	version = __version__
 	# c api
 	lib = objc.load_library("JavaScriptCore")
-	
+
 	JSVirtualMachine = ObjCClass("JSVirtualMachine")
 	JSContext = ObjCClass("JSContext")
 	JSValue = ObjCClass("JSValue")
@@ -478,14 +477,14 @@ class jscore:
 	JSWrapperMap = ObjCClass("JSWrapperMap")
 	JSVMWrapperCache = ObjCClass("JSVMWrapperCache")
 	WTFWebFileManagerDelegate = ObjCClass("WTFWebFileManagerDelegate")
-	
+
 	JSContextGetGroup = objc.c_func(lib.JSContextGetGroup, c_void_p, c_void_p)
 	JSContextGroupCreate = objc.c_func(lib.JSContextGroupCreate, c_void_p)
 	JSContextGroupRetain = objc.c_func(lib.JSContextGroupRetain, c_void_p, c_void_p)
 	JSContextGroupRelease = objc.c_func(lib.JSContextGroupRelease, None, c_void_p)
 	JSContextGetGlobalContext = objc.c_func(lib.JSContextGetGlobalContext, c_void_p, c_void_p)
 	JSContextGetGlobalObject = objc.c_func(lib.JSContextGetGlobalObject, c_void_p, c_void_p)
-	
+
 	JSGlobalContextCreate = objc.c_func(lib.JSGlobalContextCreate, c_void_p, c_void_p)
 	JSGlobalContextCreateInGroup = objc.c_func(lib.JSGlobalContextCreateInGroup, c_void_p, c_void_p, c_void_p)
 	JSGlobalContextRetain = objc.c_func(lib.JSGlobalContextRetain, c_void_p, c_void_p)
@@ -494,7 +493,7 @@ class jscore:
 	JSGlobalContextSetName = objc.c_func(lib.JSGlobalContextSetName, None, c_void_p, c_void_p)
 	JSGlobalContextIsInspectable = objc.c_func(lib.JSGlobalContextIsInspectable, c_bool, c_void_p)
 	JSGlobalContextSetInspectable = objc.c_func(lib.JSGlobalContextSetInspectable, None, c_void_p, c_bool)
-	
+
 	JSChar_p = POINTER(c_ushort)
 	JSStringCreateWithCharacters = objc.c_func(lib.JSStringCreateWithCharacters, c_void_p, c_void_p, c_size_t)
 	JSStringCreateWithUTF8CString = objc.c_func(lib.JSStringCreateWithUTF8CString, c_void_p, c_void_p)
@@ -508,7 +507,7 @@ class jscore:
 	JSStringIsEqualToUTF8CString = objc.c_func(lib.JSStringIsEqualToUTF8CString, c_bool, c_void_p, c_void_p)
 	JSStringCreateWithCFString = objc.c_func(lib.JSStringCreateWithCFString, c_void_p, c_void_p)
 	JSStringCopyCFString = objc.c_func(lib.JSStringCopyCFString, c_void_p, c_void_p, c_void_p)
-	
+
 	JSValueGetType = objc.c_func(lib.JSValueGetType, c_int, c_void_p, c_void_p)
 	JSValueIsUndefined = objc.c_func(lib.JSValueIsUndefined, c_bool, c_void_p, c_void_p)
 	JSValueIsNull = objc.c_func(lib.JSValueIsNull, c_bool, c_void_p, c_void_p)
@@ -538,7 +537,7 @@ class jscore:
 	JSValueIsInstanceOfConstructor = objc.c_func(lib.JSValueIsInstanceOfConstructor, c_bool, c_void_p, c_void_p, c_void_p, c_void_p)
 	JSValueProtect = objc.c_func(lib.JSValueProtect, None, c_void_p, c_void_p)
 	JSValueUnprotect = objc.c_func(lib.JSValueUnprotect, None, c_void_p, c_void_p)
-	
+
 	JSObjectCallAsConstructor = objc.c_func(lib.JSObjectCallAsConstructor, c_void_p, c_void_p, c_void_p, c_size_t, c_void_p, c_void_p)
 	JSObjectCallAsFunction = objc.c_func(lib.JSObjectCallAsFunction, c_void_p, c_void_p, c_void_p, c_void_p, c_size_t, c_void_p, c_void_p)
 	JSObjectCopyPropertyNames = objc.c_func(lib.JSObjectCopyPropertyNames, c_void_p, c_void_p, c_void_p)
@@ -568,17 +567,17 @@ class jscore:
 	JSObjectHasPropertyForKey = objc.c_func(lib.JSObjectHasPropertyForKey, c_bool, c_void_p, c_void_p, c_void_p, c_void_p)
 	JSObjectSetPropertyForKey = objc.c_func(lib.JSObjectSetPropertyForKey, None, c_void_p, c_void_p, c_void_p, c_void_p, c_uint, c_void_p)
 	JSObjectMakeDeferredPromise = objc.c_func(lib.JSObjectMakeDeferredPromise, c_void_p, c_void_p, c_void_p, c_void_p, c_void_p)
-	
+
 	JSClassCreate = objc.c_func(lib.JSClassCreate, c_void_p, c_void_p)
 	JSClassRelease = objc.c_func(lib.JSClassRelease, None, c_void_p)
 	JSClassRetain = objc.c_func(lib.JSClassRetain, c_void_p, c_void_p)
-	
+
 	JSPropertyNameAccumulatorAddName = objc.c_func(lib.JSPropertyNameAccumulatorAddName, None, c_void_p, c_void_p)
 	JSPropertyNameArrayGetCount = objc.c_func(lib.JSPropertyNameArrayGetCount, c_size_t, c_void_p)
 	JSPropertyNameArrayGetNameAtIndex = objc.c_func(lib.JSPropertyNameArrayGetNameAtIndex, c_void_p, c_void_p, c_size_t)
 	JSPropertyNameArrayRelease = objc.c_func(lib.JSPropertyNameArrayRelease, None, c_void_p)
 	JSPropertyNameArrayRetain = objc.c_func(lib.JSPropertyNameArrayRetain, c_void_p, c_void_p)
-	
+
 	JSObjectMakeTypedArray = objc.c_func(lib.JSObjectMakeTypedArray, c_void_p, c_void_p, c_int, c_size_t, c_void_p)
 	JSObjectMakeTypedArrayWithBytesNoCopy = objc.c_func(lib.JSObjectMakeTypedArrayWithBytesNoCopy, c_void_p, c_void_p, c_int, c_void_p, c_size_t, c_void_p, c_void_p, c_void_p)
 	JSObjectMakeTypedArrayWithArrayBuffer = objc.c_func(lib.JSObjectMakeTypedArrayWithArrayBuffer, c_void_p, c_void_p, c_int, c_void_p, c_void_p)
@@ -591,7 +590,7 @@ class jscore:
 	JSObjectMakeArrayBufferWithBytesNoCopy = objc.c_func(lib.JSObjectMakeArrayBufferWithBytesNoCopy, c_void_p, c_void_p, c_void_p, c_size_t, c_void_p, c_void_p, c_void_p)
 	JSObjectGetArrayBufferByteLength = objc.c_func(lib.JSObjectGetArrayBufferByteLength, c_size_t, c_void_p, c_void_p, c_void_p)
 	JSObjectGetArrayBufferBytesPtr = objc.c_func(lib.JSObjectGetArrayBufferBytesPtr, c_void_p, c_void_p, c_void_p, c_void_p)
-	
+
 	kJSTypedArrayTypeInt8Array = 0
 	kJSTypedArrayTypeInt16Array = 1
 	kJSTypedArrayTypeInt32Array = 2
@@ -605,16 +604,16 @@ class jscore:
 	kJSTypedArrayTypeNone = 10
 	kJSTypedArrayTypeBigInt64Array = 11
 	kJSTypedArrayTypeBigUint64Array = 12
-	
+
 	JSCheckScriptSyntax = objc.c_func(lib.JSCheckScriptSyntax, c_bool, c_void_p, c_void_p, c_void_p, c_int, c_void_p)
 	JSEvaluateScript = objc.c_func(lib.JSEvaluateScript, c_void_p, c_void_p, c_void_p, c_void_p, c_void_p, c_int, c_void_p)
 	JSGarbageCollect = objc.c_func(lib.JSGarbageCollect, None, c_void_p)
-	
+
 	JSBigIntCreateWithDouble = objc.c_func(lib.JSBigIntCreateWithDouble, c_void_p, c_void_p, c_double, c_void_p)
 	JSBigIntCreateWithInt64 = objc.c_func(lib.JSBigIntCreateWithInt64, c_void_p, c_void_p, c_int64, c_void_p)
 	JSBigIntCreateWithString = objc.c_func(lib.JSBigIntCreateWithString, c_void_p, c_void_p, c_void_p, c_void_p)
 	JSBigIntCreateWithUInt64 = objc.c_func(lib.JSBigIntCreateWithUInt64, c_void_p, c_void_p, c_uint64, c_void_p)
-	
+
 	JSValueCompare = objc.c_func(lib.JSValueCompare, c_int, c_void_p, c_void_p, c_void_p, c_void_p)
 	JSValueCompareDouble = objc.c_func(lib.JSValueCompareDouble, c_int, c_void_p, c_void_p, c_void_p, c_void_p)
 	JSValueCompareInt64 = objc.c_func(lib.JSValueCompareInt64, c_int, c_void_p, c_void_p, c_void_p, c_void_p)
@@ -624,9 +623,8 @@ class jscore:
 	JSValueToInt64 = objc.c_func(lib.JSValueToInt64, c_int64, c_void_p, c_void_p, c_void_p)
 	JSValueToUInt32 = objc.c_func(lib.JSValueToUInt32, c_uint32, c_void_p, c_void_p, c_void_p)
 	JSValueToUInt64 = objc.c_func(lib.JSValueToUInt64, c_uint64, c_void_p, c_void_p, c_void_p)
-	
+
 	# internal api (for module loader)
-	
 	# https://github.com/WebKit/WebKit/blob/7321e0dc891bcc0dce916e8d71204e58d92641cd/Source/JavaScriptCore/API/JSScriptRefPrivate.h
 	#JSScriptRef
 	JSScriptCreateReferencingImmortalASCIIText = objc.c_func(lib.JSScriptCreateReferencingImmortalASCIIText, c_void_p, c_void_p, c_void_p, c_int, c_void_p, c_size_t, c_void_p, c_void_p)
@@ -634,10 +632,10 @@ class jscore:
 	JSScriptRetain = objc.c_func(lib.JSScriptRetain, None, c_void_p)
 	JSScriptRelease = objc.c_func(lib.JSScriptRelease, None, c_void_p)
 	JSScriptEvaluate = objc.c_func(lib.JSScriptEvaluate, c_void_p, c_void_p, c_void_p, c_void_p, c_void_p)
-	
+
 	kJSScriptTypeProgram = 0
 	kJSScriptTypeModule = 1
-	
+
 	# It is necessary to define the JSModuleLoaderDelegate protocol before we can use it as its not a public protocol, for original definition
 	# see: https://github.com/WebKit/WebKit/blob/3a620254c233064790f172eb54eee6db874be7b1/Source/JavaScriptCore/API/JSContextPrivate.h
 	JSModuleLoaderDelegate = objc.protocol("JSModuleLoaderDelegate", body=[
@@ -647,7 +645,7 @@ class jscore:
 		"- (void)willEvaluateModule:(NSURL *)key;",
 		"- (void)didEvaluateModule:(NSURL *)key;"
 	], debug=False)
-	
+
 	# forwards calls to loader
 	def JSCoreModuleLoaderDelegate_context_fetchModuleForIdentifier_withResolveHandler_andRejectHandler_(_self,_cmd, _ctx, _id, _resolve, _reject):
 		loader = ObjCInstance(_self)._pyinstance()
@@ -660,38 +658,38 @@ class jscore:
 	f.argtypes = [c_void_p,c_void_p,c_void_p,c_void_p]
 	f.encoding = "@:@@@@@"
 	f.restype = None
-	
+
 	# forward to loader when defined (though does not appear to be called)
 	def JSCoreModuleLoaderDelegate_willEvaluateModule_(_self,_cmd,_url):
 		loader = ObjCInstance(_self)._pyinstance()
 		handler = getattr(loader, 'will_eval_module')
 		if handler is not None:
 			handler(ObjCInstance(_url))
-		
+
 	f = JSCoreModuleLoaderDelegate_willEvaluateModule_
 	f.argtypes = [c_void_p]
 	f.encoding = "@:@@"
 	f.restype = None
-	
+
 	# forward to loader when defined (though does not appear to be called)
 	def JSCoreModuleLoaderDelegate_didEvaluateModule_(_self,_cmd,_url):
 		loader = ObjCInstance(_self)._pyinstance()
 		handler = getattr(loader, 'did_eval_module')
 		if handler is not None:
 			handler(ObjCInstance(_url))
-		
+
 	f = JSCoreModuleLoaderDelegate_didEvaluateModule_
 	f.argtypes = [c_void_p]
 	f.encoding = "@:@@"
 	f.restype = None
-	
+
 	# JSModuleLoaderDelegate protocol implementation
 	JSCoreModuleLoaderDelegate = objc.new_class("JSCoreModuleLoaderDelegate", protocols=[JSModuleLoaderDelegate], methods = [
 		JSCoreModuleLoaderDelegate_context_fetchModuleForIdentifier_withResolveHandler_andRejectHandler_,
 		JSCoreModuleLoaderDelegate_willEvaluateModule_,
 		JSCoreModuleLoaderDelegate_didEvaluateModule_
 	])
-	
+
 	# representation of WTFString
 	class WTFString(Structure):
 		class WTFStringData(Union):
@@ -707,17 +705,17 @@ class jscore:
 			("m_data", WTFStringData),
 			("m_hashAndFlags", c_uint)
 		]
-		
+
 		def is_8bit(self):
 			return self.m_hashAndFlags & 4 != 0
-			
+
 		def to_str(self):
 			if self.is_8bit():
 				return string_at(self.m_data.m_data8, self.m_length).decode()
 			return wstring_at(self.m_data.m_data16, self.m_length).decode()
-			
+
 	WTFStringPtr = POINTER(POINTER(WTFString))
-	
+
 	# representation of context CallbackData
 	class CallbackData(Structure):
 		pass
@@ -740,12 +738,13 @@ class jscore:
 	_runtimes = {}
 	_runtimes_contexts = {}
 	_runtime_cleanups = []
+
 	@classmethod
 	def new_runtime(cls, runtime_class, *args, **kwargs):
 		if runtime_class is None:
 			raise ValueError("runtime_class must be specified")
 		return runtime_class(*args, **kwargs)
-	
+
 	# runtime singleton access
 	@classmethod
 	def runtime(cls, runtime_class = None):
@@ -805,11 +804,11 @@ class jscore:
 		vm = jscore.JSVirtualMachine.alloc().init()
 		objc.retain_global(vm)
 		return vm
-	
+
 	@classmethod
 	def vm_deallocate(cls, vm):
 		objc.release_global(vm)
-	
+
 	@classmethod
 	def runtime_deallocate(cls, runtime, vm_owner):
 		vm = runtime.vm
@@ -840,7 +839,7 @@ class jscore:
 				runtimes_count = len(cls._runtimes) == 0
 		if runtimes_count == 0:
 			cls._runtimes_cleanup()
-	
+
 	_context_lookup = {}
 	_prototype_lookup = {}
 	@classmethod
@@ -853,7 +852,7 @@ class jscore:
 		cls._context_lookup[context] = metadata
 		cls._context_lookup[context_ref.value] = metadata
 		return context
-	
+
 	@classmethod
 	def context_deallocate(cls, context):
 		context_ref = cast(context.JSGlobalContextRef(),c_void_p)
@@ -880,12 +879,12 @@ class jscore:
 		if context_ref is None:
 			return None
 		return cls._context_metadata.get(context_ref).context
-	
+
 	class _prototype_metadata:
 		def __init__(self, name, layout):
 			self.name = name
 			self.layout = layout
-	
+
 	class _context_metadata:
 		def __init__(self, context, context_ref, prototypes):
 			self.context = context
@@ -932,14 +931,14 @@ class jscore:
 				metadata.prototype_object = prototype
 				self.prototypes_metadata[_prototype.value] = metadata
 				self.prototypes_metadata[_ctor.value] = metadata
-		
+
 		_context_lookup = None
 		_lock = None
 		@classmethod
 		def init(cls, lookup, lock):
 			cls._context_lookup = lookup
 			cls._lock = lock
-		
+
 		@classmethod
 		def get(cls, id):
 			try:
@@ -949,14 +948,14 @@ class jscore:
 			if isinstance(id, c_void_p):
 				return cls._context_lookup[id.value]
 			return cls._context_lookup[id]
-	
+
 	_context_metadata.init(_context_lookup, None)
-	
+
 	@classmethod
 	def prototype_register(cls, name, layout):
 		metadata = cls._prototype_metadata(name, layout)
 		cls._prototype_lookup[name] = metadata
-	
+
 	# jscore values conversions 
 	@classmethod
 	def jsstringref_to_py(cls, str_ref):
@@ -965,7 +964,7 @@ class jscore:
 		str_utf16 = string_at(chars_ref, chars_len*2)
 		str_decoded = str_utf16.decode('utf-16')
 		return str_decoded
-	
+
 	@classmethod
 	def str_to_jsstringref(cls, str_py):
 		if str_py is None:
@@ -975,7 +974,7 @@ class jscore:
 		str_utf16 = objc.c_array(str_py.encode("utf-16le"))
 		str_ref = jscore.JSStringCreateWithCharacters(str_utf16, str_len)
 		return cast(cls.JSStringRetain(str_ref), c_void_p)
-		
+
 	@classmethod
 	def jsstringref_release(cls, str_ref):
 		if str_ref is None or not isinstance(str_ref, c_void_p):
@@ -1006,13 +1005,13 @@ class jscore:
 			names.append(name)
 		jscore.JSPropertyNameArrayRelease(names_ref)
 		return names
-	
+
 	@classmethod
 	def jsvalue_get_refs(cls, value):
 		context_ref = objc.property_value(value.context).JSGlobalContextRef()
 		value_ref = value.JSValueRef()
 		return context_ref, value_ref
-	
+
 	@classmethod
 	def jsvalueref_to_jsvalue(cls, context_ref, value_ref, index = 0, metadata = None):
 		# obtain a jsvalue by setting it by value_ref into an object with the c-api
@@ -1026,7 +1025,7 @@ class jscore:
 		jsvalue = metadata.jsvalueref_to_jsvalue_object.valueAtIndex(index)
 		metadata.jsvalueref_to_jsvalue_object.setValue_atIndex_(metadata.undefined_jsvalue, index)
 		return jsvalue
-	
+
 	@classmethod
 	def jsvalueref_get_prototype_from_metadata(cls, context_ref, value_ref, prototype_ref = None):
 		if prototype_ref is None:
@@ -1040,7 +1039,7 @@ class jscore:
 			if jscore.JSValueIsObjectOfClass(context_ref, value_ref, class_ref):
 				return p
 		return None
-	
+
 	@classmethod
 	def jsvalueref_get_prototype(cls, context_ref, value_ref):
 		prototype_ref = cls.JSObjectGetPrototype(context_ref, value_ref)
@@ -1048,14 +1047,14 @@ class jscore:
 		if metadata_prototype is not None:
 			return (~metadata_prototype).JSValueRef()
 		return cast(prototype_ref, c_void_p)
-	
+
 	@classmethod
 	def jsvalue_get_prototype(cls, value, context_ref = None, value_ref = None):
 		if value_ref is None:
 			context_ref, value_ref = cls.jsvalue_get_refs(value)
 		prototype_ref = cls.jsvalueref_get_prototype(context_ref, value_ref)
 		return cls.jsvalueref_to_jsvalue(context_ref, prototype_ref)
-	
+
 	@classmethod
 	def jsvalue_jsobject_to_py(cls, value, context_ref = None, value_ref = None, parent_ref = None):
 		if value_ref is None:
@@ -1093,32 +1092,32 @@ class jscore:
 	def jsvalue_to_py(cls, value, parent_ref = None):
 		if javascript_value.is_null_or_undefined(value):
 			return value
-		
+
 		if isinstance(value, javascript_value_base):
 			return value
-		
+
 		if not objc.ns_subclass_of(value, cls.JSValue):
 			raise Exception("Value must be JSValue")
-		
+
 		if objc.property_value(value.isUndefined):
 			return javascript_value.undefined
-		
+
 		if objc.property_value(value.isNull):
 			return None
-			
+
 		if objc.property_value(value.isBoolean):
 			return value.toBool()
 
 		if objc.property_value(value.isNumber) or objc.property_value(value.isString) or objc.property_value(value.isDate):
 			return objc.ns_to_py(value.toObject())
-		
+
 		if objc.property_value(value.isSymbol):
 			return javascript_symbol(value)
-		
+
 		context_ref, value_ref = cls.jsvalue_get_refs(value)
 		if cls.JSValueIsBigInt(context_ref, value_ref):
 			return javascript_bigint(None, context_ref, value_ref)
-			
+
 		return cls.jsvalue_jsobject_to_py(value, context_ref = context_ref, value_ref = value_ref, parent_ref = parent_ref)
 
 	@classmethod
@@ -1130,7 +1129,7 @@ class jscore:
 		if jscore.JSObjectIsFunction(context_ref, value_ref):
 			return False
 		return True
-		
+
 	@classmethod
 	def jsvalue_is_bigint(cls, value, context_ref = None, value_ref = None):
 		if value is None and value_ref is None:
@@ -1144,7 +1143,7 @@ class jscore:
 	@classmethod
 	def jsvalue_is_typed_array(cls, value, context_ref = None, value_ref = None):
 		return not cls.jsvalue_is_typed_array_type(value, cls.kJSTypedArrayTypeNone, context_ref, value_ref)
-		
+
 	@classmethod
 	def jsvalue_is_typed_array_type(cls, value, typedArrayType, context_ref = None, value_ref = None):
 		if value is None and value_ref is None:
@@ -1156,7 +1155,7 @@ class jscore:
 		ex = c_void_p(None)
 		arrayType = cls.JSValueGetTypedArrayType(context_ref, value_ref, byref(ex))
 		return arrayType == typedArrayType
-	
+
 	@classmethod
 	def jsobject_get_keys(cls, value, context_ref = None, value_ref = None):
 		if javascript_value.is_undefined(value) or not objc.property_value(value.isObject):
@@ -1166,7 +1165,7 @@ class jscore:
 		if jscore.JSObjectIsFunction(context_ref, value_ref):
 			return []
 		return cls.jsobjectref_keys(context_ref, value_ref)
-		
+
 	@classmethod
 	def jsobjectref_get_property(cls, context_ref, value_ref, key):
 		key_str = cls.str_to_jsstringref(key)
@@ -1176,7 +1175,7 @@ class jscore:
 			prop_ref = cls.JSObjectGetProperty(context_ref, value_ref, key_str, byref(ex))
 		cls.jsstringref_release(key_str)
 		return prop_ref
-	
+
 	@classmethod
 	def jsobjectref_to_py(cls, context_ref, value_ref, parent_ref = None):
 		ex = c_void_p(None)
@@ -1218,7 +1217,7 @@ class jscore:
 			if is_typed_array:
 				obj = javascript_typed_array(obj, None, context_ref, value_ref)
 		return obj
-	
+
 	@classmethod
 	def jsvalueref_to_py(cls, context_ref, value_ref, parent_ref = None):
 		if value_ref is None:
@@ -1346,13 +1345,13 @@ class jscore:
 			cls.JSObjectSetProperty(context_ref, value_ref, key_ref, val_ref, 0, byref(ex_ref))
 			cls.jsstringref_release(key_ref)
 		return value_ref
-		
+
 	@classmethod
 	def py_to_jsvalueref(cls, context_ref, value, parent_ref = None):
 		value_ref = cls._py_to_jsvalueref(context_ref, value, parent_ref)
 		#cls.JSValueProtect(context_ref, value_ref)
 		return cast(value_ref, c_void_p) # ensure a c_void_p
-	
+
 	@classmethod
 	def py_to_jsvalue(cls, context, value, parent = None):
 		if value is None:
@@ -1432,7 +1431,7 @@ class jscore:
 	def py_to_js(cls, value):
 		value = jsobject_accessor.unwrap(value)
 		return json.dumps(value, cls=javascript_encoder)
-	
+
 	_initialised = False
 	@classmethod
 	def _init(cls):
@@ -1487,7 +1486,7 @@ class javascript_encoder(json.JSONEncoder):
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
 		self.raw = False
-	
+
 	def default(self, obj):
 		if javascript_value.is_undefined(obj):
 			return None
@@ -1501,11 +1500,11 @@ class javascript_encoder(json.JSONEncoder):
 			self.raw = True
 			return str(obj)
 		return json.JSONEncoder.default(self, obj)
-	
+
 	def raw_unescape(self, chunk):
 		raw = json.loads(chunk) #unescape
 		return str(raw) # ensure string result
-	
+
 	def encode(self, o):
 		chunks = []
 		for chunk in super().iterencode(o):
@@ -1515,12 +1514,11 @@ class javascript_encoder(json.JSONEncoder):
 			chunks.append(chunk)
 		return ''.join(chunks)
 
-			
 # types for js values
 class javascript_undefined_value:
 	def __repr__(self):
 		return "undefined"
-		
+
 class javascript_value_base:
 	def __init__(self, jsvalue = None, context_ref = None, value_ref = None):
 		if jsvalue is None and context_ref is None and value_ref is None:
@@ -1531,28 +1529,27 @@ class javascript_value_base:
 			self.___jsvalue___ = jsvalue
 		else:
 			self.___jsvalue___ = jscore.jsvalueref_to_jsvalue(context_ref, value_ref)
-			
+
 	def __repr__(self):
 		return str(jscore.jsvalue_to_py(self.___jsvalue___))
 
 	def __invert__(self):
 		return self.___jsvalue___
-		
 
 class jsvalue_accessor(javascript_value_base):
 	def __iter__(self):
 		self.___keys___ = jscore.jsobject_get_keys(~self)
 		self.___keys___ = iter(self.___keys___)
 		return self
-		
+
 	def __next__(self):
 		key = next(self.___keys___)
 		return key, self.___get___(key)
-		
+
 	def __getattr__(self, key):
 		v = self.___get___(key)
 		return v
-		
+
 	def __getitem__(self, key):
 		v = self.___get___(key)
 		if v is None:
@@ -1568,10 +1565,9 @@ class jsvalue_accessor(javascript_value_base):
 			return javascript_value(v)
 		return jsvalue_accessor(v)
 
-
 class javascript_value(javascript_value_base):
 	undefined = javascript_undefined_value()
-	
+
 	@classmethod
 	def is_undefined(cls, value):
 		return value is cls.undefined
@@ -1579,15 +1575,15 @@ class javascript_value(javascript_value_base):
 	@classmethod
 	def is_defined(cls, value):
 		return value is not cls.undefined
-	
+
 	@classmethod
 	def is_null(cls, value):
 		return value is None
-	
+
 	@classmethod
 	def is_null_or_undefined(cls,value):
 		return cls.is_null(value) or cls.is_undefined(value)
-		
+
 	@classmethod
 	def is_not_null(cls, value):
 		return not cls.is_null_or_undefined(value)
@@ -1599,7 +1595,7 @@ class javascript_value(javascript_value_base):
 		self._value_ref = value_ref
 		self._val = None
 		self._cached = False
-	
+
 	@property
 	def jsvalue(self):
 		if self._jsvalue is not None:
@@ -1609,7 +1605,7 @@ class javascript_value(javascript_value_base):
 		else:
 			raise ValueError("Invalid javascript_value, JSValue and refs are null")
 		return self._jsvalue
-		
+
 	@property
 	def jsobject(self):
 		return jsvalue_accessor(self._jsvalue, self._context_ref, self._value_ref)
@@ -1629,19 +1625,19 @@ class javascript_value(javascript_value_base):
 				self._val = javascript_list(self._val)
 			self._cached = True
 		return self._val
-		
+
 	def __repr__(self):
 		return str(self.value)
-		
+
 	def __invert__(self):
 		return self.jsvalue
-		
+
 class javascript_type_base:
 	mixin_member_excludes = set(
 		['__class__', '__dict__', '__dir__', '__init__', '__init_subclass__', '__new__', '__subclasshook__'] +
 		['__getattr__', '__getattribute__', '__setattr__', '__delattr__', '__index__']
 	)
-	
+
 	@classmethod
 	def mixin(cls, typ):
 		members = set(dir(typ))
@@ -1659,38 +1655,38 @@ class javascript_type_base:
 			if type(result) is typ:
 				return self.___ctor___(result)
 			return result
-	
+
 		for member in members:
 			attr = getattr(typ, member)
 			if callable(attr):
 				attr = functools.partialmethod(javascript_type_mixin_method, attr)
 			setattr(javascript_type_mixin, member, attr)
 		return javascript_type_mixin
-	
+
 	def __init__(self, value, typ = None):
 		self.___value___ = value
 		self.___type___ = typ
 
 	def __repr__(self):
 		return repr(self.py_value)
-		
+
 	def __str__(self):
 		return str(self.py_value)
-			
+
 	@property
 	def py_value(self):
 		return self.___value___
-		
+
 	@property
 	def py_type(self):
 		return self.___type___
-		
+
 	def to_jsvalue(self, context):
 		if isinstance(self.py_value, javascript_type_base):
 			return self.py_value.to_jsvalue(context)
 		else:
 			raise NotImplementedError()
-		
+
 	def to_jsvalueref(self, context_ref):
 		if isinstance(self.py_value, javascript_type_base):
 			return self.py_value.to_jsvalueref(context_ref)
@@ -1700,7 +1696,7 @@ class javascript_type_base:
 class javascript_bigint(javascript_type_base):
 	c_int64_limit = objc.c_int_limit(c_int64)
 	c_uint64_limit = objc.c_int_limit(c_uint64)
-	
+
 	@classmethod
 	def new(cls, value):
 		if isinstance(value, c_uint64) or isinstance(value, c_uint32) or isinstance(value, c_uint16) or isinstance(value, c_uint8):
@@ -1735,7 +1731,7 @@ class javascript_bigint(javascript_type_base):
 				value = c_int64(value)
 		value = javascript_bigint.new(value)
 		super().__init__(value, javascript_bigint)
-		
+
 	def __bool__(self):
 		return bool(int(self.py_value))
 
@@ -1774,7 +1770,7 @@ class javascript_bigint_i(javascript_bigint.mixin(int)):
 	def to_jsvalue(self, context):
 		value = self.py_value
 		return jscore.JSValue.valueWithNewBigIntFromInt64_inContext_(c_int64(value), context)
-		
+
 	def to_jsvalueref(self, context_ref):
 		value = self.py_value
 		ex = c_void_p(None)
@@ -1782,12 +1778,12 @@ class javascript_bigint_i(javascript_bigint.mixin(int)):
 		if jsvalue_ref is None and ex is not None:
 			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
 		return jsvalue_ref
-		
+
 class javascript_biguint_i(javascript_bigint.mixin(int)):
 	def to_jsvalue(self, context):
 		value = self.py_value
 		return jscore.JSValue.valueWithNewBigIntFromUInt64_inContext_(c_uint64(value), context)
-		
+
 	def to_jsvalueref(self, context_ref):
 		value = self.py_value
 		ex = c_void_p(None)
@@ -1795,14 +1791,13 @@ class javascript_biguint_i(javascript_bigint.mixin(int)):
 		if jsvalue_ref is None and ex is not None:
 			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
 		return jsvalue_ref
-		
+
 class javascript_bigint_f(javascript_bigint.mixin(float)):
-	
 	def to_jsvalue(self, context):
 		value = self.py_value
 		value = math.trunc(value) # truncate as this is a cast
 		return jscore.JSValue.valueWithNewBigIntFromDouble_inContext_(c_double(value), context)
-		
+
 	def to_jsvalueref(self, context_ref):
 		value = self.py_value
 		ex = c_void_p(None)
@@ -1811,12 +1806,12 @@ class javascript_bigint_f(javascript_bigint.mixin(float)):
 		if jsvalue_ref is None and ex is not None:
 			raise ValueError(jscore.jsvalueref_to_py(context_ref, ex))
 		return jsvalue_ref
-		
+
 class javascript_bigint_s(javascript_bigint.mixin(str)):
 	def to_jsvalue(self, context):
 		value = self.py_value
 		return jscore.JSValue.valueWithNewBigIntFromString_inContext_(objc.ns(value), context)
-		
+
 	def to_jsvalueref(self, context_ref):
 		value = self.py_value
 		ex = c_void_p(None)
@@ -1835,11 +1830,11 @@ class javascript_list(list):
 		elif isinstance(item, list):
 			item = javascript_list(item)
 		return item
-		
+
 	def __iter__(self):
 		self.index = -1
 		return self
-	
+
 	def __next__(self):
 		self.index += 1
 		if self.index < len(self):
@@ -1850,7 +1845,7 @@ class javascript_object(dict):
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
 		self.___init___ = True
-		
+
 	def __getattr__(self, key):
 		value = self.get(key, javascript_value.undefined)
 		if isinstance(value, dict):
@@ -1858,7 +1853,7 @@ class javascript_object(dict):
 		elif isinstance(value, list):
 			value = javascript_list(value)
 		return value
-		
+
 	def __setattr__(self, key, value):
 		if not self.__dict__.get("___init___", False):
 			super().__setattr__(key, value)
@@ -1883,7 +1878,7 @@ class javascript_object_value_base(javascript_value_base):
 		self.___obj___ = obj
 		super().__init__(jsvalue, context_ref, value_ref)
 		self._init_()
-		
+
 	def _init_(self):
 		self.___init___ = True
 
@@ -1897,7 +1892,7 @@ class javascript_object_value_base(javascript_value_base):
 		elif isinstance(value, list):
 			value = javascript_list(value)
 		return value
-		
+
 	def __setattr__(self, key, value):
 		if not self.__dict__.get("___init___", False):
 			super().__setattr__(key, value)
@@ -1914,11 +1909,11 @@ class javascript_typed_array_iter:
 		self._length = length
 		self._item_type = item_type
 		self._item_size = sizeof(self._item_type)
-	
+
 	def __iter__(self):
 		self._index = 0
 		return self
-	
+
 	def __next__(self):
 		if self._ptr is not None and self._index < self._length:
 			addr = self._ptr.value + self._index
@@ -1928,7 +1923,6 @@ class javascript_typed_array_iter:
 		raise StopIteration()
 
 class javascript_typed_array(javascript_object_value_base):
-	
 	@classmethod
 	def get_ctype(cls, jstype):
 		if jstype == jscore.kJSTypedArrayTypeUint8Array or jstype == jscore.kJSTypedArrayTypeArrayBuffer:
@@ -1967,20 +1961,20 @@ class javascript_typed_array(javascript_object_value_base):
 		if self._ptr is not None:
 			self._ptr = cast(self._ptr, c_void_p)
 		super()._init_()
-		
+
 	def __repr__(self):
 		items = str(list(self))
 		obj = super().__repr__()
 		return "\n".join([items, obj])
-	
+
 	def __iter__(self):
 		return self._new_iter()
-		
+
 	def __getitem__(self, key):
 		if isinstance(key, int):
 			return self._get_item(key, self._item_type)
 		raise KeyError(f"Invalid item key {key}")
-	
+
 	def _get_item(self, index, item_type = None):
 		if item_type is None:
 			item_type = self._item_type
@@ -1995,7 +1989,7 @@ class javascript_typed_array(javascript_object_value_base):
 		addr = self._ptr.value + index
 		value = item_type.from_address(addr)
 		return value
-	
+
 	def _new_iter(self, item_type = None):
 		if item_type is None:
 			item_type = self._item_type
@@ -2010,7 +2004,7 @@ class javascript_typed_array(javascript_object_value_base):
 		buffer_array = (c_uint8 * length)()
 		self.copy_to(addressof(buffer_array), count=length)
 		return bytes(buffer_array)
-		
+
 	def copy_to(self, dst, offset = 0, count = None):
 		dst = cast(dst, c_void_p)
 		if dst.value is None:
@@ -2027,7 +2021,7 @@ class javascript_typed_array(javascript_object_value_base):
 		ptr = cast(cast(ptr, c_void_p).value + offset, c_void_p)
 		memmove(dst, ptr, count)
 		return count
-	
+
 	#def __buffer__(self, flags): # ideally we'd implement the buffer protocol too if python was >= 3.12
 		#pass
 
@@ -2075,7 +2069,7 @@ class javascript_function:
 			exception = jscore.jsvalueref_to_py(context_ref, ex_ref)
 			raise ImportError(f"Exception compiling function: {exception}")
 		return self.value_ref
-	
+
 	def ns_arg(self, context, arg):
 		if isinstance(arg, dict):
 			copy = {}
@@ -2088,7 +2082,7 @@ class javascript_function:
 				copy.append(self.ns_arg(context, arg[i]))
 			return copy
 		return jscore.py_to_jsvalue(context, arg)
-	
+
 	def ns_args(self, context, args):
 		args = list(args)
 		args = self.ns_arg(context, args)
@@ -2115,7 +2109,7 @@ class javascript_function:
 				self.compile()
 			else:
 				raise NotImplementedError("Cannot call source only functions without a context_ref")
-		
+
 		if self.context_ref is not None and self.value_ref is not None:
 			count = len(args)
 			args_ref = None
@@ -2136,24 +2130,23 @@ class javascript_function:
 				raise Exception(jscore.jsvalueref_to_py(self.context_ref, exception_ref))
 			jsvalue = jscore.jsvalueref_to_jsvalue(self.context_ref, value_ref)
 			return javascript_value(jsvalue, self.context_ref, value_ref)
-
 		raise NotImplementedError("Cannot call this type of javascript_function")
-		
+
 	@property
 	def name(self):
 		src = str(self)
 		m = re.match("function([^\(]*)\(", repr)
 		return m.group().strip()
-		
+
 	@property
 	def is_native(self):
 		repr = str(self).strip()
 		return re.fullmatch("function[^\{]+\{[^\[]+\[native code\][^\}]+}", repr) is not None
-		
+
 	@property
 	def compiled(self):
 		return self.jsvalue is not None or self.value_ref is not None
-	
+
 	def __call__(self, *args, **kwargs):
 		return self.call(*args, **kwargs).value
 
@@ -2166,14 +2159,14 @@ class javascript_function:
 		except Exception:
 			pass
 		return "function() {}"
-			
+
 	def __invert__(self):
 		if self.jsvalue is not None:
 			return self.jsvalue
 		elif self.context_ref and self.value_ref is not None:
 			return jscore.jsvalueref_to_jsvalue(self.context_ref, self.value_ref)
 		raise Exception("Compile function to access jsvalue")
-		
+
 	@classmethod
 	def from_source(cls, source, context = None, parent_ref = None):
 		context_ref = None
@@ -2186,7 +2179,6 @@ class javascript_function:
 				context_ref = context.JSGlobalContextRef()
 		return cls(source=source, context_ref=context_ref, parent_ref=parent_ref)
 
-
 class javascript_callback:
 	def __init__(self, callback, name = None):
 		self.callback = callback
@@ -2195,7 +2187,7 @@ class javascript_callback:
 		self.context_ref = None
 		self.value_ref = None
 		self._jsvalue = None
-		
+
 	def compile(self, context_ref = None, parent_ref = None):
 		if context_ref is None:
 			context_ref = self.context_ref
@@ -2216,14 +2208,14 @@ class javascript_callback:
 		ex = c_void_p(None)
 		jscore.JSObjectSetProperty(self.context_ref, parent_ref, name_ref, value_ref, 0, byref(ex))
 		jscore.jsstringref_release(name_ref)
-	
+
 	def get_jsvalue_ref(self, context_ref, parent_ref = None):
 		if self.context_ref is not None and self.context_ref != context_ref:
 			raise Exception("Cannot change context")
 		if self.value_ref is None:
 			self.compile(context_ref, parent_ref)
 		return self.value_ref
-	
+
 	def get_jsvalue(self, context, parent = None):
 		context_ref = context.JSGlobalContextRef()
 		parent_ref = None
@@ -2254,7 +2246,7 @@ class javascript_callback:
 		except Exception as e:
 			log.exception(f"javascript_callback exception '{self.name}' '{self.callback}' {e}")
 			# set an error / exception back in context ?
-		
+
 	def __invert__(self):
 		if self._jsvalue is not None:
 			return self._jsvalue
@@ -2268,11 +2260,11 @@ class javascript_callback:
 		name = f"python_callback_{cls._name_count}"
 		cls._name_count = cls._name_count + 1
 		return name
-		
+
 	@classmethod
 	def is_callable(cls, func):
 		return not isinstance(func, javascript_function) and callable(func)
-		
+
 	@classmethod
 	def wrap(cls, context, value, name = None):
 		if javascript_callback.is_callable(value):
@@ -2336,7 +2328,7 @@ class javascript_promise:
 		self._promise = jsvalue_acessor(self.jsvalue)
 		self._resolve = javascript_function(self.jsresolve)
 		self._reject = javascript_function(self.jsreject)
-	
+
 	def call(self):
 		if self._callback is None:
 			return
@@ -2351,12 +2343,12 @@ class javascript_promise:
 		if self.value_ref is None:
 			self.compile(context_ref)
 		return self.value_ref
-	
+
 	def get_jsvalue(self, context):
 		if self.jsvalue is None:
 			self.compile(context)
 		return self.jsvalue
-		
+
 	def resolve(self, *args):
 		if self._resolve is None:
 			if self.jsvalue is None:
@@ -2364,7 +2356,7 @@ class javascript_promise:
 			else:
 				raise Exception("Promise resolve is only available in root promise.")
 		return self._resolve.call(*args)
-		
+
 	def reject(self, *args):
 		if self._reject is None:
 			if self.jsvalue is None:
@@ -2372,22 +2364,21 @@ class javascript_promise:
 			else:
 				raise Exception("Promise reject is only available in root promise.")
 		return self._reject.call(*args)
-	
+
 	def then(self, callback):
 		if self._promise is None:
 			raise Exception("Promise must be compiled")
 		return javascript_promise(~(self._promise.then(callback)))
-		
+
 	def catch(self, callback):
 		if self._promise is None:
 			raise Exception("Promise must be compiled")
 		return javascript_promise(~(self._promise.catch(callback)))
-		
+
 	def final(self, callback):
 		if self._promise is None:
 			raise Exception("Promise must be compiled")
 		return javascript_promise(~(self._promise["finally"](callback)))
-
 
 class jsscript_ref:
 	def __init__(self, runtime, url, source):
@@ -2406,14 +2397,14 @@ class jsscript_ref:
 		self.error_line = error_line
 		if self.script_ref:
 			jscore.JSScriptRetain(self.script_ref)
-	
+
 	def release(self):
 		if self.runtime.vm is not None:
 			raise Exception("VM must be released before releasing scripts")
 		jscore.JSScriptRelease(self.script_ref) # must outlive VM
 		jscore.jsstringref_release(self.source_ref)
 		jscore.jsstringref_release(self.url_ref)
-		
+
 	def eval(self, context):
 		context = context.context
 		context_ref = context.JSGlobalContextRef()
@@ -2428,7 +2419,7 @@ class jsscript_ref:
 		value = jscore.jsvalueref_to_py(context_ref, value_ref)
 		exception = jscore.jsvalueref_to_py(context_ref, exception_ref)
 		return value, exception
-		
+
 	def __invert__(self):
 		return self.script_ref
 
@@ -2449,12 +2440,12 @@ class jscore_module_loader:
 		self.failed = []
 		self.attempted = []
 		self.evaluated = []
-		
+
 	def release(self):
 		self.context.setModuleLoaderDelegate_(None)
 		objc.release_global(self.delegate)
 		self.delegate = None
-		
+
 	def fetch_module(self, module, resolve, reject):
 		if module in self.evaluated:
 			reject()
@@ -2470,15 +2461,15 @@ class jscore_module_loader:
 		else:
 			self.failed.append(module)
 			reject()
-			
+
 	def will_eval_module(self, url):
 		self.attempted.append(url)
 		pass
-		
+
 	def did_eval_module(self, url):
 		self.evaluated.append(url)
 		pass
-		
+
 	def get_script(self, path):
 		path = self.runtime.get_file_path(path)
 		sourceUrl = self.runtime.get_source_url(None, path)
@@ -2491,7 +2482,7 @@ class jscore_module_loader:
 			if script is not None:
 				return script
 		return None
-		
+
 	def load_script(self, script, scriptType, path, sourceUrl, source = None):
 		file_path = self.runtime.get_file_path(path)
 		lookup = self.modules if scriptType == jscore.kJSScriptTypeModule else self.scripts
@@ -2517,7 +2508,6 @@ class jscore_module_loader:
 		self.load_script(script, scriptType, path, sourceUrl)
 		return script
 
-
 # base runtime framework
 class jscore_context:
 	def __init__(self, runtime, context = None):
@@ -2538,7 +2528,7 @@ class jscore_context:
 		self.accessor = javascript_context_accessor(self)
 		self.callbacks = {}
 		self.allocated = True
-		
+
 	def deallocate(self):
 		if self.context is None:
 			raise Exception("Context already deallocated. Do not call allocate/deallocate manually.")
@@ -2574,30 +2564,30 @@ class jscore_context:
 		if self.depth == 0:
 			self.destroy()
 		return self
-		
+
 	def __invert__(self):
 		return self.context
-		
+
 	class javascript_eval_result(javascript_value):
 		def __init__(self, jsvalue, exception):
 			super().__init__(jsvalue)
 			self._exception = exception
 			if self._exception is not None:
 				self._exception = javascript_error(self._exception)
-		
+
 		@property
 		def exception(self):
 			return self._exception
-			
+
 		def __repr__(self):
 			return str({"value":self.value, "exception": self.exception})
-	
+
 	def eval(self, script, sourceUrl=None):
 		self.alloc()
 		result, ex = jscore.context_eval(self.context, script, sourceUrl)
 		result = self.javascript_eval_result(result, ex)
 		return result
-	
+
 	def eval_jsscript(self, jsscript):
 		if jsscript is None:
 			raise ValueError("Null JSScript pointer")
@@ -2608,26 +2598,26 @@ class jscore_context:
 			self.context.setException(None) # clear exception if set
 		result = self.javascript_eval_result(result, ex)
 		return result
-	
+
 	def eval_script_source(self, source, scriptType = jscore.kJSScriptTypeProgram, modulePath = None):
 		script = self.loader.load_source(source, scriptType, modulePath)
 		return self.eval_jsscript(script)
-		
+
 	def eval_script_file(self, path, scriptType = jscore.kJSScriptTypeProgram):
 		script = self.loader.load_file(path, scriptType)
 		return self.eval_jsscript(script)
-		
+
 	def eval_source(self, source):
 		return self.eval_script_source(source, jscore.kJSScriptTypeProgram)
-	
+
 	def eval_file(self, path):
 		return self.eval_script_file(path, jscore.kJSScriptTypeProgram)
-	
+
 	@property
 	def context_ref(self):
 		self.alloc()
 		return self.context.JSGlobalContextRef()
-		
+
 	def callback(self, func, name = None):
 		if not javascript_callback.is_callable(func):
 			raise Exception(f"'{func}' is not a python callable/function")
@@ -2637,7 +2627,7 @@ class jscore_context:
 			callback = javascript_callback(func, name)
 			self.callbacks[key] = callback
 		return callback
-		
+
 	@property
 	def js(self):
 		self.alloc()
@@ -2654,13 +2644,13 @@ class jscore_runtime:
 		self.depth = 0
 		self.module_paths = {}
 		self.scripts = []
-		
+
 	def allocate(self):
 		if self.vm is not None:
 			raise Exception("VM already allocated. Do not call allocate/deallocate manually")
 		self.vm = jscore.vm_allocate()
 		self.vm_owner = True
-	
+
 	def deallocate(self):
 		if self.vm is None:
 			raise Exception("VM already deallocated. Do not call allocate/deallocate manually")
@@ -2692,7 +2682,7 @@ class jscore_runtime:
 			path = tempfile.mktemp(dir = Path.cwd())
 		self.module_paths[source] = path
 		return path
-		
+
 	def get_file_path(self, path):
 		path = str(path)
 		if path.startswith("file://"):
@@ -2701,18 +2691,18 @@ class jscore_runtime:
 		if not p.is_absolute():
 			p = Path.cwd().joinpath(p)
 		return p
-		
+
 	def get_source_url(self, source, modulePath):
 		path = Path(self.get_module_path(source, modulePath))
 		path = str(path.relative_to(Path.cwd()))
 		return f"file://./{path}"
-	
+
 	def load_source(self, source, scriptType = jscore.kJSScriptTypeProgram, modulePath = None, sourceUrl = None):
 		loader = jscore.JSScript.scriptOfType_withSource_andSourceURL_andBytecodeCache_inVirtualMachine_error_
 		if sourceUrl is None:
 			sourceUrl = self.get_source_url(source, modulePath)
 		return self.load_script(loader, source, scriptType, sourceUrl)
-	
+
 	def load_file(self, path, scriptType = jscore.kJSScriptTypeProgram, sourceUrl = None):
 		p = self.get_file_path(path)
 		if not p.is_file() or not p.exists():
@@ -2723,7 +2713,7 @@ class jscore_runtime:
 			sourceUrl = self.get_source_url(None, p)
 		loader = jscore.JSScript.scriptOfType_memoryMappedFromASCIIFile_withSourceURL_andBytecodeCache_inVirtualMachine_error_
 		return self.load_script(loader, path, scriptType, sourceUrl)
-		
+
 	def load_script_ref(self, path = None, source = None, url = None):
 		url = self.get_file_path(url)
 		if source is None and path is not None:
@@ -2767,7 +2757,7 @@ class jscore_runtime:
 		if self.depth == 0:
 			self.destroy()
 		return self
-		
+
 	def __invert__(self):
 		return self.vm
 
@@ -2785,7 +2775,7 @@ class jsvalue_evaluator:
 	def __init__(self, context, parent = None):
 		self.context = context
 		self.parent = parent
-	
+
 	def object_equal(self, x, y):
 		if isinstance(x, dict):
 			for k,v in x.items():
@@ -2805,17 +2795,17 @@ class jsvalue_evaluator:
 					return False
 			return True
 		return False
-	
+
 	def value_equal(self, x, y):
 		if x is y or x == y:
 			return True
 		return str(x) == str(y) # repr compare
-		
+
 	def item_equal(self, x, y):
 		if isinstance(x, list) or isinstance(x, dict):
 			return self.object_equal(x, y)
 		return self.value_equal(x, y)
-	
+
 	def eval_set(self, context, parent, key, value, current, equal = None):
 		if isinstance(value, list):
 			if (equal is None and self.object_equal(value, current)) or equal:
@@ -2872,7 +2862,7 @@ class jsvalue_evaluator:
 		val = self.eval_set(context, jsvalue, key, value, current)
 		if val is not None:
 			jsvalue.setValue_forProperty_(val, key)
-		
+
 	def set_self(self, value, current):
 		value = jsobject_accessor.unwrap(value)
 		current = jsobject_accessor.unwrap(current)
@@ -2897,7 +2887,6 @@ class jsvalue_evaluator:
 					pass
 				self.eval_set(context, jsvalue, k, v, c)
 
-
 # metaclass to map jsobjects to appear analogous to regular python objects
 class jsobject_accessor:
 	def __init__(self, context, jsobject, path):
@@ -2906,7 +2895,7 @@ class jsobject_accessor:
 		self.___evaluator___ = jsvalue_evaluator(context, jsobject)
 		self.___path___ = path
 		self.___init___ = True
-		
+
 	def ___get___(self, key):
 		key = str(key)
 		if not self.___jsobject___.hasProperty_(key):
@@ -2920,7 +2909,7 @@ class jsobject_accessor:
 				path = ".".join([self.___path___, path])
 			return jsobject_accessor(self.___context___, value, path)
 		return jscore.jsvalue_to_py(value, self.___jsobject___)
-		
+
 	def ___set___(self, key, value):
 		current = self.___get___(key)
 		path = key
@@ -2935,16 +2924,16 @@ class jsobject_accessor:
 
 	def __repr__(self):
 		return str(jscore.jsvalue_to_py(self.___jsobject___))
-	
+
 	def __getattr__(self, key):
 		return self.___get___(key)
-	
+
 	def __setattr__(self, key, value):
 		if not self.__dict__.get("___init___", False):
 			super().__setattr__(key, value)
 		else:
 			self.___set___(key, value)
-			
+
 	def __contains__(self, key):
 		value = self.___get___(key)
 		return not javascript_value.is_undefined(value)
@@ -2967,7 +2956,6 @@ class jsobject_accessor:
 			return jscore.jsvalue_to_py(~value)
 		return value
 
-
 # metaclass to map the main global context to appear analogous to a regular python object
 class javascript_context_accessor:
 	def __init__(self, context):
@@ -2975,7 +2963,7 @@ class javascript_context_accessor:
 		self.___globalObject___ = objc.property_value(context.context.globalObject)
 		self.___evaluator___ = jsvalue_evaluator(context, self.___globalObject___)
 		self.___init___ = True
-		
+
 	def ___get___(self, key):
 		value = javascript_value.undefined
 		if not isinstance(key, str):
@@ -2988,7 +2976,7 @@ class javascript_context_accessor:
 		if jscore.jsvalue_is_object(value):
 			return jsobject_accessor(self.___context___, value, key)
 		return jscore.jsvalue_to_py(value)
-		
+
 	def ___set___(self, key, value):
 		jsvalue = None
 		if not self.___globalObject___.hasProperty_(key):
@@ -3005,7 +2993,6 @@ class javascript_context_accessor:
 		if jsvalue is not None:
 			current = jscore.jsvalue_to_py(jsvalue)
 		self.___evaluator___.set(key, value, current)
-		
 
 	def __getattr__(self, key):
 		return self.___get___(key)
@@ -3015,20 +3002,20 @@ class javascript_context_accessor:
 			super().__setattr__(key, value)
 		else:
 			self.___set___(key, value)
-	
+
 	def __contains__(self, key):
 		value = self.___get___(key)
 		return not javascript_value.is_undefined(value)
-	
+
 	def __getitem__(self, key):
 		value = self.___get___(key)
 		if javascript_value.is_undefined(value):
 			raise IndexError(f"'{key}' is undefined.")
 		return value
-		
+
 	def __setitem__(self, key, value):
 		return self.___set___(key, value)
-		
+
 	def __invert__(self):
 		return self.___globalObject___
 # concrete runtimes and contexts
@@ -3049,7 +3036,7 @@ class wasm_namespace:
 			imports = {}
 		self.___imports___ = imports
 		self.___init___ = True
-		
+
 	def ___get___(self, key):
 		value = self.___imports___.get(key, javascript_value.undefined)
 		if javascript_value.is_undefined(value):
@@ -3058,7 +3045,7 @@ class wasm_namespace:
 		if isinstance(value, dict):
 			return wasm_namespace(value)
 		return value
-		
+
 	def ___set___(self, key, value):
 		self.___imports___[key] = value
 
@@ -3070,17 +3057,17 @@ class wasm_namespace:
 			super().__setattr__(key, value)
 		else:
 			self.___set___(key, value)
-	
+
 	def __contains__(self, key):
 		value = self.___get___(key)
 		return not javascript_value.is_undefined(value)
-	
+
 	def __getitem__(self, key):
 		value = self.___get___(key)
 		if javascript_value.is_undefined(value):
 			raise IndexError(f"'{key}' is undefined.")
 		return value
-		
+
 	def __setitem__(self, key, value):
 		return self.___set___(key, value)
 
@@ -3091,7 +3078,7 @@ class wasm_module:
 	magic = b'\0asm'
 	version = b'\1\0\0\0'
 	header = magic + version
-	
+
 	@classmethod
 	def has_header(cls, data):
 		header = cls.header
@@ -3104,7 +3091,7 @@ class wasm_module:
 			if index == header_len:
 				return True
 		return False
-	
+
 	def __init__(self, data = None, name = None, path = None, imports = {}):
 		self.name = name
 		if self.name is not None:
@@ -3148,7 +3135,7 @@ class wasm_module:
 		if self.nsdata is not None:
 			return nsdata_to_bytes(self.nsdata)
 		return b''
-		
+
 	def load(self, context, env = None):
 		if self.module is not None:
 			return self.instance
@@ -3177,15 +3164,15 @@ class wasm_module:
 		if not javascript_value.is_null_or_undefined(_initialize):
 			_initialize() # call initialize for reactors
 		return self.instance
-		
+
 	@property
 	def loaded(self):
 		return self.instance is not None
-		
+
 	@property
 	def imports(self):
 		return self._namespace
-		
+
 	@property
 	def exports(self):
 		if not self.loaded:
@@ -3199,7 +3186,7 @@ class wasm_module:
 		self.jsdata = None
 		self.module = None
 		self.instance = None
-	
+
 	def save(self, path):
 		path = Path(str(path))
 		if not path.is_absolute():
@@ -3237,7 +3224,7 @@ class wasm_module:
 		name = Path(str(path)).name.split('.component.wasm')[0]
 		name = name.split('.wasm')[0]
 		return name
-		
+
 	@classmethod
 	def get_module_path(cls, name):
 		id = cls.get_module_id(name)
@@ -3246,20 +3233,20 @@ class wasm_module:
 		if len(version) > 0:
 			return f"{version}/{name}"
 		return name
-	
+
 	@classmethod
 	def get_file_path(cls, path):
 		path = Path(str(path))
 		if not path.is_absolute():
 			path = path.cwd().joinpath(path)
 		return path
-		
+
 	@classmethod
 	def get_module_file_path(cls, module):
 		if isinstance(module, cls):
 			return module.path
 		return cls.get_file_path(module)
-	
+
 	@classmethod
 	def from_file_py(cls, path):
 		path = cls.get_file_path(path)
@@ -3267,7 +3254,7 @@ class wasm_module:
 			data = module_file.read()
 			name = cls.get_module_name(path)
 			return cls(data, name, path)
-			
+
 	@classmethod
 	def from_file(cls, path, fileManager = None):
 		path = cls.get_file_path(path)
@@ -3282,12 +3269,12 @@ class wasm_process_thread(threading.Thread):
 		self.lock = threading.RLock()
 		self.awaiter = threading.Condition(self.lock)
 		self.exit_code = None
-		
+
 	def run(self):
 		self.exit_code = self.process.run()
 		with self.awaiter:
 			self.awaiter.notify_all()
-			
+
 	def wait(self, timeout = None, join = False):
 		with self.awaiter:
 			self.awaiter.wait(timeout = timeout)
@@ -3316,37 +3303,37 @@ class wasm_process:
 		self.lock = threading.RLock()
 		self.awaiter = threading.Condition(self.lock)
 		self.env.init_process(self)
-	
+
 	@property
 	def module_path(self):
 		return self.module.path
-	
+
 	@property
 	def exit_code(self):
 		return self.env.exit_code
-		
+
 	@exit_code.setter
 	def exit_code(self, value):
 		self.env.exit_code = value
-	
+
 	@property
 	def returncode(self):
 		if self.exit_code is None:
 			return 0
 		return self.exit_code
-		
+
 	@property
 	def stdin(self):
 		return self.env.stdin
-		
+
 	@property
 	def stdout(self):
 		return self.env.stdout
-		
+
 	@property
 	def stderr(self):
 		return self.env.stderr
-	
+
 	def run(self):
 		# c style _start entry point
 		exit_code = None
@@ -3374,7 +3361,7 @@ class wasm_process:
 			except ImportError as e:
 				log.exception(f"{e}")
 		return self._terminated(exit_code)
-	
+
 	def run_async(self):
 		if self.thread is not None:
 			raise Exception("Process thread is already running.")
@@ -3387,11 +3374,11 @@ class wasm_process:
 			self.stdin.write(input)
 		self.wait_until_exit(timeout = timeout)
 		return self.stdout.getvalue(), self.stderr.getvalue()
-		
+
 	def notify(self):
 		with self.awaiter:
 			self.awaiter.notify()
-			
+
 	def notify_all(self):
 		with self.awaiter:
 			self.awaiter.notify_all()
@@ -3400,7 +3387,7 @@ class wasm_process:
 		self.killing = True
 		self.killed = True
 		# this needs to actually kill the thread
-	
+
 	def _terminated(self, exit_code = None):
 		self.running = False
 		self.thread = None
@@ -3409,14 +3396,14 @@ class wasm_process:
 		if self.callback is not None:
 			self.callback(self)
 		return self.exit_code
-		
+
 	def wait(self, timeout = None, join = False):
 		if self.thread is not None:
 			self.thread.wait(timeout = timeout, join = join)
-		
+
 	def wait_until_exit(self, timeout = None):
 		self.wait(timeout = timeout, join = True)
-		
+
 	def send_signal(self, sig):
 		#print(sig)
 		pass
@@ -3429,7 +3416,7 @@ class wasm_io(io.StringIO):
 		self.write_count = 0
 		self.read_cookie = self.tell()
 		self.write_cookie = self.tell()
-		
+
 	def read(self, *args, **kwargs):
 		with self.awaiter:
 			while self.read_count == self.write_count:
@@ -3439,7 +3426,7 @@ class wasm_io(io.StringIO):
 			self.read_cookie = self.tell()
 			self.read_count += len(data)
 			return data
-		
+
 	def write(self, *args, **kwargs):
 		with self.awaiter:
 			self.seek(self.write_cookie)
@@ -3454,15 +3441,15 @@ class wasm_component:
 		self._wrap_handlers()
 		self.wasi = wasi
 		self.env = env
-	
+
 	@property
 	def memory(self):
 		return self.env.memory
-		
+
 	@property
 	def memory_view(self):
 		return self.env.memory_view
-	
+
 	def _wrap_handler(self, func, func_name, component_type):
 		def _handler(*args, **kwargs):
 			try:
@@ -3492,7 +3479,7 @@ class wasm_component:
 					log.debug(f"return wasm_component {component_type}.{func_name}: {err.name}, {err}")
 				return err # we need to return a failure code to wasm if an error or exception is not otherwise handled
 		return _handler
-	
+
 	def _wrap_handlers(self):
 		class _exclude_members(wasm_component):
 			def __init__(self):
@@ -3583,7 +3570,7 @@ class wasi_err(enum.IntEnum):
 	txtbsy = enum.auto() #;;; Text file busy.
 	xdev = enum.auto() #;;; Cross-device link.
 	notcapable = enum.auto() # ;;; Extension: Capabilities insufficient.
-	
+
 class wasi_error(Exception):
 	def __init__(self, ex, err = None):
 		if isinstance(ex, wasi_err):
@@ -3594,15 +3581,15 @@ class wasi_error(Exception):
 		if self.err is None:
 			self.err = wasi_err.notrecoverable
 		self._is_exception = True
-	
+
 	@property
 	def is_exception(self):
 		return self._is_exception
-			
+
 	def as_result(self):
 		self._is_exception = False
 		return self
-		
+
 
 class wasi_clockid(enum.IntEnum):
 	#;;; The clock measuring real time. Time value zero corresponds with 1970-01-01T00:00:00Z.
@@ -3791,7 +3778,7 @@ class wasi_filestat:
 			self.atim = stats.st_atime_ns
 			self.mtim = stats.st_mtime_ns
 			self.ctim = stats.st_ctime_ns
-	
+
 	@classmethod
 	def get_filetype(cls, stats, context = None):
 		if stats is None:
@@ -4213,7 +4200,7 @@ class wasm_memory_view:
 			setter_littleEndian = self.system_littleEndian
 		self.getter_littleEndian = getter_littleEndian
 		self.setter_littleEndian = setter_littleEndian
-		
+
 	def cleanup(self):
 		pass
 
@@ -4224,25 +4211,25 @@ class wasm_memory_view:
 	@property
 	def buffer(self):
 		return self._buffer
-		
+
 	@property
 	def byteLength(self):
 		return self.view.byteLength
-		
+
 	@property
 	def byteOffset(self):
 		return self.view.byteOffset
-		
+
 	def getter_endianess(self, littleEndian = None):
 		if littleEndian is not None:
 			return littleEndian
 		return self.getter_littleEndian
-		
+
 	def setter_endianess(self, littleEndian = None):
 		if littleEndian is not None:
 			return littleEndian
 		return self.setter_littleEndian
-	
+
 	def getBigInt64(self, offset, littleEndian = None):
 		return int(self.view.getBigInt64(offset, self.getter_endianess(littleEndian)))
 
@@ -4291,21 +4278,21 @@ class wasm_memory_view:
 	def setInt16(self, offset, value, littleEndian = None):
 		self.view.setInt16(offset, value, self.setter_endianess(littleEndian))
 		return offset + 2
-		
+
 	def getInt32(self, offset, littleEndian = None):
 		return self.view.getInt32(offset, self.getter_endianess(littleEndian))
 
 	def setInt32(self, offset, value, littleEndian = None):
 		self.view.setInt32(offset, value, self.setter_endianess(littleEndian))
 		return offset + 4
-		
+
 	def getUint8(self, offset):
 		return self.view.getUint8(offset)
 
 	def setUint8(self, offset, value):
 		self.view.setUint8(offset, value)
 		return offset + 1
-		
+
 	def getUint16(self, offset, littleEndian = None):
 		return self.view.getUint16(offset, self.getter_endianess(littleEndian))
 
@@ -4331,7 +4318,7 @@ class wasm_memory_view:
 
 	def setInt64(self, *args, **kwargs):
 		return self.setBigInt64(*args, **kwargs)
-	
+
 	max_string = 2048 # a quick length detection for short strings
 	def getString(self, offset, length):
 		if length < wasm_memory_view.max_string or offset+length < self.byteLength:
@@ -4365,17 +4352,17 @@ class wasm_memory_view:
 			data += b'\0'
 			length += 1
 		return self.setBytes(offset, data, length)
-		
+
 	def getBytes(self, offset, length):
 		return self._allocator.memory_get_bytes(self.memory, offset, length)
-		
+
 	def setBytes(self, offset, data, length = None):
 		if length is None:
 			length = len(data)
 		data = bytes(data[:length])
 		self._allocator.memory_set_bytes(self.memory, offset, data)
 		return offset + length
-		
+
 	def unpack(self, fmt, offset):
 		length = struct.calcsize(fmt)
 		data = self.getBytes(offset, length)
@@ -4383,7 +4370,7 @@ class wasm_memory_view:
 		if len(values) == 1:
 			return values[0]
 		return values
-		
+
 	class _unpack_iter:
 		def __init__(self, fmt, size, length, data):
 			self.fmt = fmt
@@ -4391,11 +4378,11 @@ class wasm_memory_view:
 			self.length = length
 			self.data = data
 			self.index = 0
-			
+
 		def __iter__(self):
 			self.index = 0
 			return self
-			
+
 		def __next__(self):
 			if self.index >= self.length:
 				raise StopIteration()
@@ -4405,16 +4392,16 @@ class wasm_memory_view:
 			if len(values) == 1:
 				return values[0]
 			return values
-			
+
 	def unpack_iter(self, fmt, offset, count):
 		size = struct.calcsize(fmt)
 		length = size * count
 		data = self.getBytes(offset, length)
 		return self._unpack_iter(fmt, size, length, data)
-		
+
 	def getArray(self, fmt, offset, count):
 		return list(self.unpack_iter(fmt, offset, count))
-		
+
 	def setArray(self, fmt, offset, items):
 		# string arrays need special handling to avoid a byte order marker as we dont have to care about multibyte chars
 		stringArray = fmt[0] == "s" or fmt[1] == "s" or fmt[0] == "p" or fmt[1] == "p"
@@ -4441,7 +4428,7 @@ class wasm_mount:
 	def __init__(self, real_path, mount_path):
 		self.real_path = real_path
 		self.mount_path = mount_path
-		
+
 	def __repr__(self):
 		path = str(self.mount_path)
 		if not path.startswith('/'):
@@ -4455,7 +4442,7 @@ class wasm_fd:
 		self.advice = []
 		self.fdstats = wasi_fdstat()
 		self._read_dir_paths = None
-	
+
 	@property
 	def path(self):
 		id = self.id
@@ -4469,27 +4456,27 @@ class wasm_fd:
 		if isinstance(self.context, wasm_mount):
 			return str(self.context)
 		return "/dev/null"
-	
+
 	@property
 	def mount_path(self):
 		if isinstance(self.context, wasm_mount):
 			return self.context.mount_path
 		return None
-	
+
 	@property
 	def real_path(self):
 		if isinstance(self.context, wasm_mount):
 			return self.context.real_path
 		return None
-		
+
 	def fdstat(self):
 		return self.fdstats
-		
+
 	def fdstat_set(self, **kwargs):
 		for k,v in kwargs.items():
 			if hasattr(self.fdstats, k):
 				setattr(self.fdstats, k, v)
-				
+
 	def filestat(self):
 		stats = None
 		try:
@@ -4498,24 +4485,24 @@ class wasm_fd:
 			raise wasi_error(wasi_err.noent).as_result()
 		filestat = wasi_filestat(stats, self)
 		return filestat
-		
+
 	def filestat_set(self, size=None, atim=None, mtim=None, ctim=None, fst_flags=0):
 		pass
-		
+
 	def advise(self, offset, count, advice):
 		self.advice.append({
 			"offset":offset,
 			"count":count,
 			"advice": advice
 		})
-		
+
 	def allocate(self, offset, count):
 		pass
-	
+
 	@property
 	def is_dir(self):
 		return self.real_path.is_dir()
-	
+
 	def read_dir(self, cookie):
 		if not self.is_dir:
 			raise wasi_error(wasi_err.notdir)
@@ -4539,7 +4526,7 @@ class wasm_fd:
 			raise wasi_error(wasi_err.noent).as_result()
 		filestat = wasi_filestat(stats, self)
 		return filestat
-		
+
 	def path_filestat_set(self, flags, path, size=None, atim=None, mtim=None, ctim=None, fst_flags=0):
 		pass
 
@@ -4547,28 +4534,28 @@ class wasm_stream:
 	def __init__(self, stream, append = False):
 		self.stream = stream
 		self.append = append
-	
+
 	@property
 	def seekable(self):
 		return self.stream.seekable
-	
+
 	def tell(self, *args, **kwargs):
 		return self.stream.tell(*args, **kwargs)
-	
+
 	def seek(self, *args, **kwargs):
 		self.stream.seek(*args, **kwargs)
-		
+
 	def read(self, *args, **kwargs):
 		return self.stream.read(*args, **kwargs)
-		
+
 	def write(self, *args, **kwargs):
 		if self.append:
 			self.stream.seek(0, os.SEEK_END)
 		return self.stream.write(*args, **kwargs)
-	
+
 	def flush(self, *args, **kwargs):
 		self.stream.flush()
-	
+
 	def close(self, *args, **kwargs):
 		self.stream.close(*args, **kwargs)
 
@@ -4579,7 +4566,7 @@ class wasm_fds:
 		self._contexts = {}
 		for k,v in self._streams.items():
 			self._contexts[v] = k
-		
+
 	MAX_FD = 32767 # SHORT_MAX - 0,1,2 are reserved for stdin stdout and stderr
 	def new_fd(self, context, stream, **kwargs):
 		count = len(self._fds)
@@ -4596,7 +4583,7 @@ class wasm_fds:
 		if stream is not None:
 			self._streams[id] = stream
 		return fd
-	
+
 	def get_id(self, fd):
 		if isinstance(fd, int):
 			return fd
@@ -4606,21 +4593,21 @@ class wasm_fds:
 		if id is None:
 			raise wasi_error(wasi_err.badf)
 		return id
-	
+
 	def get_fd(self, id):
 		id = self.get_id(id)
 		fd = self._fds.get(id)
 		if fd is None:
 			raise wasi_error(wasi_err.badf)
 		return fd
-	
+
 	def get_stream(self, id):
 		id = self.get_id(id)
 		stream = self._streams.get(id)
 		if stream is None:
 			raise wasi_error(wasi_err.badf)
 		return stream
-		
+
 	def renumber_fd(self, from_id, to_id):
 		fid = self.get_id(from_id)
 		tid = self.get_id(to_id)
@@ -4635,7 +4622,7 @@ class wasm_fds:
 		if stream is not None:
 			del self.streams[fid]
 			self.streams[tid] = stream
-		
+
 	def close_stream(self, id):
 		id = self.get_id(id)
 		if id < 3:
@@ -4644,7 +4631,7 @@ class wasm_fds:
 		if stream is not None:
 			stream.close()
 			del self._streams[id]
-		
+
 	def close_fd(self, id):
 		id = self.get_id(id)
 		if id < 3:
@@ -4657,7 +4644,7 @@ class wasm_fds:
 			del self._streams[id]
 		del self._contexts[context]
 		del self._fds[id]
-		
+
 	def cleanup(self):
 		fds = list(self._fds.keys())
 		for fd in fds:
@@ -4698,7 +4685,7 @@ class wasm_env:
 	@property
 	def vars(self):
 		return self._vars
-		
+
 	@property
 	def dirs(self):
 		return self._dirs
@@ -4706,47 +4693,47 @@ class wasm_env:
 	@property
 	def exit_code(self):
 		return self._exit_code
-		
+
 	@exit_code.setter
 	def exit_code(self, value):
 		self._exit_code = value
-	
+
 	@property
 	def clock(self):
 		return self._clock
-	
+
 	@property
 	def components(self):
 		if self._components is None:
 			self._components = {}
 		return self._components
-		
+
 	@property
 	def process(self):
 		return self._process
-		
+
 	@process.setter
 	def process(self, value):
 		self._process = value
-		
+
 	def notify(self):
 		self.process.notify()
-	
+
 	def _ensure_memory(self):
 		if self._allocator is None or self._memory is not None:
 			return
 		self._memory = wasm_memory(self._allocator.memory_factory())
-		
+
 	def _ensure_memory_view(self):
 		if self._allocator is None or (self._memory_view is not None and self._memory_view.byteLength != 0):
 			return
 		self._memory_view = wasm_memory_view(self.memory, self._allocator.memory_view_factory(self.memory), self._allocator)
-	
+
 	@property
 	def memory(self):
 		self._ensure_memory()
 		return self._memory
-		
+
 	@memory.setter
 	def memory(self, value):
 		if value is None:
@@ -4754,12 +4741,12 @@ class wasm_env:
 		else:
 			self._memory = wasm_memory(value)
 		self._memory_view = None
-		
+
 	@property
 	def memory_view(self):
 		self._ensure_memory_view()
 		return self._memory_view
-	
+
 	def init_process(self, process):
 		self.process = process
 		for dir in self.dirs:
@@ -4767,14 +4754,14 @@ class wasm_env:
 				self.preopen(dir[0])
 			else:
 				self.preopen(dir)
-	
+
 	def process_raise(self, signal):
 		pass
-	
+
 	def process_exit(self, exit_code):
 		self.exit_code = exit_code
 		self.cleanup()
-	
+
 	def preopen(self, dir):
 		path = Path(dir)
 		if not path.exists():
@@ -4786,13 +4773,13 @@ class wasm_env:
 
 	def _new_fd(self, context, stream = None):
 		return self._fds.new_fd(context, stream)
-	
+
 	def get_fd(self, fd):
 		return self._fds.get_fd(fd)
 
 	def get_stream(self, fd):
 		return self._fds.get_stream(fd)
-		
+
 	def open_fd(self, fd, path, oflags, fs_rights_base, fs_rights_inheriting, fdflags):
 		fd = self.get_fd(fd)
 		path = Path(path)
@@ -4816,16 +4803,16 @@ class wasm_env:
 			mode += "b"
 			stream = wasm_stream(open(real_path, mode), append)
 		return self._new_fd(mount, stream)
-	
+
 	def renumber_fd(self, from_fd, to_fd):
 		self._fds.renumber_fd(from_fd, to_fd)
-	
+
 	def close_fd(self, fd):
 		self._fds.close_fd(fd)
-		
+
 	def close_stream(self, fd):
 		self._fds.close_stream(fd)
-		
+
 	def cleanup(self):
 		self._fds.cleanup()
 		if self._memory_view is not None:
@@ -4841,7 +4828,7 @@ class wasm_context(jscore_context):
 		self._wasi = wasm_wasi(self, self._env)
 		self._lock = threading.RLock()
 		self._processes = {}
-		
+
 	def allocate(self):
 		super().allocate()
 		self._loader = self.eval("""(function() {
@@ -4887,25 +4874,25 @@ class wasm_context(jscore_context):
 			module.free()
 		self._modules = None
 		super().deallocate()
-	
+
 	@property
 	def imports(self):
 		return self._namespace
-	
+
 	@property
 	def modules(self):
 		return dict(self._modules)
-	
+
 	def module(self, name):
 		name = wasm_module.get_module_name(name)
 		return self._modules.get(name)
-		
+
 	def module_instance(self, name):
 		module = self.module(name)
 		if module is None:
 			return None
 		return module.instance
-		
+
 	def find_module(self, name):
 		module_path = wasm_module.get_module_path(name)
 		module_name = wasm_module.get_module_name(name)
@@ -4920,7 +4907,7 @@ class wasm_context(jscore_context):
 				if path.exists():
 					return path
 		return None
-		
+
 	def load_module(self, module, env = None):
 		log.debug(f"load: {module}")
 		if isinstance(module, str):
@@ -4942,7 +4929,7 @@ class wasm_context(jscore_context):
 		result = module.load(self, env)
 		self._modules[module.name] = module
 		return module
-		
+
 	def _resolve_module_imports(self, module, imports, env):
 		if imports is None:
 			imports = {}
@@ -4999,7 +4986,7 @@ class wasm_context(jscore_context):
 			ns[import_name] = resolved_import
 		namespace = javascript_callback.wrap(self, namespace)
 		return namespace
-	
+
 	def _load_module_array(self, module_data, name = None, imports = None, env = None):
 		if not jscore.jsvalue_is_typed_array_type(module_data, jscore.kJSTypedArrayTypeUint8Array):
 			raise ImportError("Module array must be JSValue of an Uint8Array instance type.")
@@ -5013,7 +5000,7 @@ class wasm_context(jscore_context):
 		if javascript_value.is_not_null(memory) and env is not None:
 			env.memory = memory
 		return module_instance.value, name
-	
+
 	# creates a wasm_process which runs with this context, 
 	# module: path to .wasm file or wasm_module, args: command line args
 	# kwargs defaults:
@@ -5037,7 +5024,7 @@ class wasm_context(jscore_context):
 		process = wasm_process(module_env, module, args, kwargs, _cleanup)
 		self._processes[process] = process
 		return process
-	
+
 	def run(self, module, *args, **kwargs):
 		# wasm/wasi synchronous run, this runs the given module/program on the current thread until termination
 		process = self.new_process(module, *args, **kwargs)
@@ -5047,13 +5034,13 @@ class wasm_context(jscore_context):
 		# wasm/wasi asynchronous run, this runs the given module/program on a new thread until termination
 		process = self.new_process(module, *args, **kwargs)
 		return process.run_async()
-		
+
 	def serve(self, path, *args, **kwargs):
 		# wasm/wasi serve placeholder
 		# server needs handling as running a standard http server
 		# this should run synchronously / block until termination
 		pass
-		
+
 	def serve_async(self, path, *args, **kwargs):
 		# async serve variant as background thread?
 		pass
