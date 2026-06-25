@@ -82,7 +82,7 @@ Or install with pip using pipTerminal from [Pythonista pip configration tool](ht
 pip install pythonista-jscore-runtime 
 ```
 
-Or download [jscore_runtime.py](https://github.com/M4nw3l/pythonista-jscore-runtime/blob/v0.0.8/jscore_runtime.py) from the latest v0.0.x release tag and copy to your site-packages folder.
+Or download [jscore_runtime.py](https://github.com/M4nw3l/pythonista-jscore-runtime/blob/v0.0.9/jscore_runtime.py) from the latest v0.0.x release tag and copy to your site-packages folder.
 
 ### Installation in other iOS apps
 
