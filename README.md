@@ -88,7 +88,9 @@ Or download [jscore_runtime.py](https://github.com/M4nw3l/pythonista-jscore-runt
 
 An objective-c bridge is required to use jscore-runtime so one of `objc_util` or `rubicon.objc` must be available or installed in the environment beforehand.
 - **Rubicon ObjC**
-Install or update the latest version using Pip.
+
+Install or update to the latest version (>= v0.5.4) using Pip.
+
 
 ```
 pip install rubicon-objc
