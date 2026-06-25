@@ -16,7 +16,7 @@ Aiming also to be compatible with WebAssembly in Python 3 ongoing through backpo
 - Performant, efficient and accurate with values handled in round-tripable formats, and using direct low level memory access where applicable.
 - Comprehensive mapping of Apple's [JavascriptCore Objective-C API](https://developer.apple.com/documentation/javascriptcore?language=objc).
 - Zero external dependencies in Pythonista, implented as a single file Python module, using just `objc-util` and the python standard library. 
-- Cross-compatible with `rubicon.objc` by [BeeWare](https://github.com/beeware/rubicon-objc) so should also be supported any iOS environment with Python 3.10 or above.
+- Cross-compatible with `rubicon.objc` by [BeeWare](https://github.com/beeware/rubicon-objc) so should also be supported in any iOS environment with Python 3.10 or above.
 
 ## Features - Unstable
 - WebAssembly System Interface at [(WASI) snapshot preview 1](https://github.com/WebAssembly/WASI/tree/wasi-0.1) now has partial support and passes a number of the official [WebAssembly/wasi-testsuite](https://github.com/WebAssembly/wasi-testsuite) tests. 
@@ -84,6 +84,20 @@ pip install pythonista-jscore-runtime
 
 Or download [jscore_runtime.py](https://github.com/M4nw3l/pythonista-jscore-runtime/blob/v0.0.8/jscore_runtime.py) from the latest v0.0.x release tag and copy to your site-packages folder.
 
+### Installation in other iOS apps
+
+An objective-c bridge is required to use jscore-runtime so one of `objc_util` or `rubicon.objc` must be available or installed in the environment beforehand.
+- **Rubicon ObjC**
+Install or update the latest version using Pip.
+
+```
+pip install rubicon-objc
+```
+
+- **objc_util**
+This module comes as part of the built in standard library components with Pythonista 3.
+It can be obtained from the app in the standard library site-packages folder from in Pythonista 3. 
+Or the code can also be found by searching for "objc_util".
 
 ## Usage
 
